@@ -1,0 +1,16 @@
+name: cd
+
+# Phase 2 only. Public release via JEP-229 CD happens after the plugin is hosted
+# under jenkinsci and granted Artifactory upload permissions. Kept manual-only so it
+# stays inactive during Phase 1 internal pinned installs.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  placeholder:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Release CD is wired in Phase 2 (jenkinsci hosting + repository-permissions-updater)."

@@ -1,0 +1,44 @@
+<?jelly escape-by-default='true'?>
+<j:jelly xmlns:j="jelly:core" xmlns:f="/lib/form">
+
+  <f:entry title="Job full-name pattern" field="jobNamePattern">
+    <f:textbox/>
+  </f:entry>
+
+  <f:entry title="Events">
+    <f:checkbox field="notifyStart" title="On start"/>
+    <f:checkbox field="notifySuccess" title="On success"/>
+    <f:checkbox field="notifyFailure" title="On failure"/>
+    <f:checkbox field="notifyUnstable" title="On unstable"/>
+    <f:checkbox field="notifyAborted" title="On aborted"/>
+    <f:checkbox field="notifyNotBuilt" title="On not built"/>
+  </f:entry>
+
+  <f:advanced title="Overrides (optional)">
+    <f:entry title="Channel override" field="channel">
+      <f:textbox/>
+    </f:entry>
+    <f:entry title="Webhook credential override" field="webhookCredentialId">
+      <f:select/>
+    </f:entry>
+    <f:entry title="Start template override" field="startTemplate">
+      <f:textarea/>
+    </f:entry>
+    <f:entry title="Success template override" field="successTemplate">
+      <f:textarea/>
+    </f:entry>
+    <f:entry title="Failure template override" field="failureTemplate">
+      <f:textarea/>
+    </f:entry>
+    <f:entry title="Unstable template override" field="unstableTemplate">
+      <f:textarea/>
+    </f:entry>
+    <f:entry title="Aborted template override" field="abortedTemplate">
+      <f:textarea/>
+    </f:entry>
+    <f:entry title="Not-built template override" field="notBuiltTemplate">
+      <f:textarea/>
+    </f:entry>
+  </f:advanced>
+
+</j:jelly>
