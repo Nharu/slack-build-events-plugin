@@ -1,0 +1,8 @@
+<?jelly escape-by-default='true'?>
+<div>
+  Sends controller-global, fully templated Slack notifications on build start and
+  completion via an Incoming Webhook, gated by an opt-in job-name allowlist — with no
+  Jenkinsfile changes. Messages use token-macro templates plus built-in
+  <code>SLACK_*</code> macros; dispatch is asynchronous and best-effort, so Slack
+  latency never blocks a build.
+</div>

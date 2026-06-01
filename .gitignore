@@ -1,0 +1,22 @@
+# Maven build output
+target/
+work/
+*.hpi
+*.jpi
+
+# IDE - IntelliJ IDEA
+*.iml
+*.ipr
+*.iws
+.idea/
+
+# IDE - Eclipse
+.project
+.classpath
+.settings/
+
+# IDE - VS Code
+.vscode/
+
+# OS
+.DS_Store

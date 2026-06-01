@@ -1,0 +1,48 @@
+<?jelly escape-by-default='true'?>
+<j:jelly xmlns:j="jelly:core" xmlns:f="/lib/form">
+  <f:section title="Slack Templated Notifier">
+
+    <f:entry title="Default channel" field="defaultChannel"
+             help="/plugin/slack-build-events/help-defaultChannel.html">
+      <f:textbox/>
+    </f:entry>
+
+    <f:entry title="Default webhook credential" field="defaultWebhookCredentialId">
+      <f:select/>
+    </f:entry>
+
+    <f:entry title="Max retries on HTTP 429" field="maxRetriesOn429">
+      <f:number clazz="positive-number" default="1" min="0" max="5"/>
+    </f:entry>
+
+    <f:advanced title="Default templates and color">
+      <f:entry title="Default color override" field="defaultColor">
+        <f:textbox/>
+      </f:entry>
+      <f:entry title="Default start template" field="defaultStartTemplate">
+        <f:textarea/>
+      </f:entry>
+      <f:entry title="Default success template" field="defaultSuccessTemplate">
+        <f:textarea/>
+      </f:entry>
+      <f:entry title="Default failure template" field="defaultFailureTemplate">
+        <f:textarea/>
+      </f:entry>
+      <f:entry title="Default unstable template" field="defaultUnstableTemplate">
+        <f:textarea/>
+      </f:entry>
+      <f:entry title="Default aborted template" field="defaultAbortedTemplate">
+        <f:textarea/>
+      </f:entry>
+      <f:entry title="Default not-built template" field="defaultNotBuiltTemplate">
+        <f:textarea/>
+      </f:entry>
+    </f:advanced>
+
+    <f:entry title="Rules" help="/plugin/slack-build-events/help-rules.html">
+      <f:repeatableHeteroProperty field="rules" hasHeader="true"
+                                  addCaption="Add rule" oneEach="false"/>
+    </f:entry>
+
+  </f:section>
+</j:jelly>

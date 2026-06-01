@@ -1,0 +1,19 @@
+unclassified:
+  slackTemplatedNotifier:
+    defaultChannel: "#jenkins"
+    defaultWebhookCredentialId: "slack-webhook-url"
+    maxRetriesOn429: 2
+    rules:
+      - jobNamePattern: "dev/server.*"
+        notifyStart: true
+        notifySuccess: true
+        notifyFailure: true
+credentials:
+  system:
+    domainCredentials:
+      - credentials:
+          - string:
+              scope: SYSTEM
+              id: "slack-webhook-url"
+              secret: "https://hooks.slack.com/SUPER/SECRET"
+              description: "Slack incoming webhook"
