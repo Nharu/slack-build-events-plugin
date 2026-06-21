@@ -15,6 +15,7 @@ import org.jenkinsci.Symbol;
 import org.kohsuke.stapler.DataBoundConstructor;
 import org.kohsuke.stapler.DataBoundSetter;
 import org.kohsuke.stapler.QueryParameter;
+import org.kohsuke.stapler.verb.POST;
 
 /**
  * One ordered allowlist rule: a job full-name regex plus per-event toggles and
@@ -256,6 +257,7 @@ public class NotificationRule extends AbstractDescribableImpl<NotificationRule> 
             return "Slack notification rule";
         }
 
+        @POST
         public FormValidation doCheckJobNamePattern(@QueryParameter String value) {
             Jenkins.get().checkPermission(Jenkins.ADMINISTER);
             if (Util.fixEmptyAndTrim(value) == null) {

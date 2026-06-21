@@ -51,5 +51,7 @@ public class RetryOn429Test {
 
         // 1 initial + 2 retries = 3 attempts, then dropped (no further calls).
         assertEquals(3, sender.calls.get());
+        // Retry-budget exhaustion is a normal terminal outcome, not a pool-unavailability drop.
+        assertEquals(0, NotificationDispatcher.get().droppedCount());
     }
 }

@@ -20,8 +20,6 @@ final class NotificationContext {
     private final Run<?, ?> run;
     @NonNull
     private final TaskListener listener;
-    @NonNull
-    private final EventType eventType;
     @CheckForNull
     private final String channel;
     @NonNull
@@ -34,14 +32,12 @@ final class NotificationContext {
     NotificationContext(
             @NonNull Run<?, ?> run,
             @NonNull TaskListener listener,
-            @NonNull EventType eventType,
             @CheckForNull String channel,
             @NonNull String webhookCredentialId,
             @NonNull String template,
             @NonNull String color) {
         this.run = run;
         this.listener = listener;
-        this.eventType = eventType;
         this.channel = channel;
         this.webhookCredentialId = webhookCredentialId;
         this.template = template;
@@ -56,11 +52,6 @@ final class NotificationContext {
     @NonNull
     TaskListener listener() {
         return listener;
-    }
-
-    @NonNull
-    EventType eventType() {
-        return eventType;
     }
 
     @CheckForNull

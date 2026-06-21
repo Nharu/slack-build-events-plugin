@@ -2,6 +2,7 @@ package io.jenkins.plugins.slackbuildevents;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.not;
 import static org.junit.Assert.assertEquals;
 
 import hudson.model.FreeStyleProject;
@@ -68,6 +69,48 @@ public class TemplateExpansionTest {
         // The inner ${SLACK_DEPLOYER} token must survive verbatim (single-pass, no re-expansion).
         assertThat(text, containsString("x-${SLACK_DEPLOYER}-"));
         assertThat(text, containsString("\"q"));
+    }
+
+    @Test
+    public void gitBranchMacroEscapesLinkInjection() throws Exception {
+        NotificationRule rule = SlackTestHelpers.rule("myjob", List.of("success"));
+        rule.setSuccessTemplate("branch=${SLACK_GIT_BRANCH}");
+        SlackTestHelpers.config().setRules(List.of(rule));
+
+        FreeStyleProject p = j.createFreeStyleProject("myjob");
+        // Hostile branch name carrying <url|label> link markup (env GIT_BRANCH = primary vector).
+        String hostileBranch = "origin/<https://evil|click>";
+        p.addProperty(new ParametersDefinitionProperty(new StringParameterDefinition("GIT_BRANCH", "def")));
+        j.assertBuildStatusSuccess(
+                p.scheduleBuild2(0, new ParametersAction(new StringParameterValue("GIT_BRANCH", hostileBranch))));
+        SlackTestHelpers.awaitDispatch();
+
+        String text = text(sender.bodies.get(0));
+        // Control chars escaped → the injected link markup is neutralized (no raw '<https').
+        assertThat(text, containsString("branch=origin/&lt;https://evil|click&gt;"));
+        assertThat(text, not(containsString("<https")));
+    }
+
+    @Test
+    public void buildUrlLinkMarkupSurvivesWhileBranchIsEscaped() throws Exception {
+        NotificationRule rule = SlackTestHelpers.rule("myjob", List.of("success"));
+        // Admin-authored <${SLACK_BUILD_URL}|Console> link markup must survive (the URL macro is
+        // excluded from escaping), while the SCM-derived branch value is escaped.
+        rule.setSuccessTemplate("<${SLACK_BUILD_URL}|Console> branch=${SLACK_GIT_BRANCH}");
+        SlackTestHelpers.config().setRules(List.of(rule));
+
+        FreeStyleProject p = j.createFreeStyleProject("myjob");
+        p.addProperty(new ParametersDefinitionProperty(new StringParameterDefinition("GIT_BRANCH", "def")));
+        j.assertBuildStatusSuccess(
+                p.scheduleBuild2(0, new ParametersAction(new StringParameterValue("GIT_BRANCH", "x<y>"))));
+        SlackTestHelpers.awaitDispatch();
+
+        String text = text(sender.bodies.get(0));
+        // Link markup intact: literal <…|Console> around the (unescaped) build URL.
+        assertThat(text, containsString("<http"));
+        assertThat(text, containsString("|Console>"));
+        // Branch value escaped.
+        assertThat(text, containsString("branch=x&lt;y&gt;"));
     }
 
     private static String text(String body) {

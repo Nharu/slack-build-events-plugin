@@ -5,6 +5,7 @@ import com.cloudbees.plugins.credentials.CredentialsProvider;
 import com.cloudbees.plugins.credentials.domains.DomainRequirement;
 import edu.umd.cs.findbugs.annotations.CheckForNull;
 import edu.umd.cs.findbugs.annotations.NonNull;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import hudson.Extension;
 import hudson.ExtensionList;
 import hudson.init.Terminator;
@@ -43,7 +44,8 @@ import org.jenkinsci.plugins.tokenmacro.TokenMacro;
  *
  * <p>Build/event threads only ever {@link #dispatch} (cheap enqueue); Slack latency or
  * outages never block a build. Every code path completes the per-notification future,
- * so the {@link #awaitAllDispatched} test barrier is race-free.
+ * so the {@link #awaitAllDispatched} test barrier waits for the in-flight work captured
+ * at the moment it is called; work enqueued after that snapshot is not awaited.
  */
 @Extension
 public class NotificationDispatcher {
@@ -62,6 +64,9 @@ public class NotificationDispatcher {
     private volatile WebhookSender sender;
     private volatile LongSupplier clock = System::currentTimeMillis;
 
+    /** Guarded by {@code this}: once {@link #shutdownPools()} has run, refuse to recreate pools. */
+    private boolean stopped;
+
     private final AtomicInteger pendingRetries = new AtomicInteger();
     private final AtomicLong droppedCount = new AtomicLong();
     private final Set<CompletableFuture<Void>> inFlight = ConcurrentHashMap.newKeySet();
@@ -77,17 +82,27 @@ public class NotificationDispatcher {
             @NonNull ScheduledExecutorService scheduler,
             @NonNull WebhookSender sender,
             @NonNull LongSupplier clock) {
+        // Drain any running pools first (takes the lock internally, blocks outside it),
+        // then reinstall the seams and re-arm under a small lock so a concurrent
+        // dispatch/ensureStarted sees a consistent state.
         shutdownPools();
-        this.executor = executor;
-        this.scheduler = scheduler;
-        this.sender = sender;
-        this.clock = clock;
-        this.pendingRetries.set(0);
-        this.droppedCount.set(0);
-        this.inFlight.clear();
+        synchronized (this) {
+            this.executor = executor;
+            this.scheduler = scheduler;
+            this.sender = sender;
+            this.clock = clock;
+            this.stopped = false;
+            this.pendingRetries.set(0);
+            this.droppedCount.set(0);
+            this.inFlight.clear();
+        }
     }
 
     private synchronized void ensureStarted() {
+        if (stopped) {
+            // Shutdown has run; do not recreate pools (e.g. a late dispatch during teardown).
+            return;
+        }
         if (executor == null) {
             executor = new ThreadPoolExecutor(
                     CORE_POOL,
@@ -124,8 +139,16 @@ public class NotificationDispatcher {
         int maxRetries = clampRetries(currentMaxRetries());
         Operation op = new Operation(context, maxRetries);
         inFlight.add(op.future);
+        ExecutorService ex = executor;
+        if (ex == null) {
+            // Pool torn down between ensureStarted() and here (shutdown race) → drop
+            // without leaking the future into inFlight forever.
+            droppedCount.incrementAndGet();
+            finish(op);
+            return op.future;
+        }
         try {
-            executor.execute(() -> runAttempt(op));
+            ex.execute(() -> runAttempt(op));
         } catch (RejectedExecutionException e) {
             droppedCount.incrementAndGet();
             LOGGER.log(Level.WARNING, "Slack notification dropped: dispatch queue saturated");
@@ -146,8 +169,16 @@ public class NotificationDispatcher {
             String json = SlackMessage.build(op.context.channel(), op.context.color(), text);
             WebhookSender.Response response = sender.send(webhookUrl, json);
 
-            if (response.statusCode() == 429 && op.attemptsLeft > 0 && pendingRetries.get() < MAX_PENDING_RETRIES) {
-                scheduleRetry(op, retryDelayMillis(response.retryAfter()));
+            if (response.statusCode() == 429 && op.attemptsLeft > 0) {
+                // Reserve a retry slot atomically, then roll back if over the global cap.
+                // Doing the check-and-increment here (not in scheduleRetry) makes the cap
+                // test-then-act a single atomic step under concurrent retries.
+                if (pendingRetries.incrementAndGet() <= MAX_PENDING_RETRIES) {
+                    scheduleRetry(op, retryDelayMillis(response.retryAfter()));
+                    return;
+                }
+                pendingRetries.decrementAndGet();
+                finish(op);
                 return;
             }
             // 2xx / other 4xx / 5xx → terminal best-effort (no further retry).
@@ -159,24 +190,46 @@ public class NotificationDispatcher {
         }
     }
 
+    @SuppressFBWarnings(
+            value = "VO_VOLATILE_INCREMENT",
+            justification = "attemptsLeft is mutated by at most one dispatch thread at a time for a given "
+                    + "operation (never concurrently); the volatile is for cross-thread visibility across the "
+                    + "retry handoff, not for atomicity, so the non-atomic decrement is intentional and safe.")
     private void scheduleRetry(Operation op, long delayMillis) {
+        // The retry slot was already reserved (pendingRetries incremented) in runAttempt.
         op.attemptsLeft--;
-        pendingRetries.incrementAndGet();
+        ScheduledExecutorService sch = scheduler;
+        if (sch == null) {
+            // Pool torn down (shutdown race) → release the reserved slot and drop.
+            pendingRetries.decrementAndGet();
+            droppedCount.incrementAndGet();
+            finish(op);
+            return;
+        }
         try {
-            scheduler.schedule(
-                    () -> {
-                        pendingRetries.decrementAndGet();
-                        try {
-                            executor.execute(() -> runAttempt(op));
-                        } catch (RejectedExecutionException e) {
-                            droppedCount.incrementAndGet();
-                            finish(op);
-                        }
-                    },
-                    delayMillis,
-                    TimeUnit.MILLISECONDS);
+            sch.schedule(() -> resubmit(op), delayMillis, TimeUnit.MILLISECONDS);
         } catch (RejectedExecutionException e) {
             pendingRetries.decrementAndGet();
+            droppedCount.incrementAndGet();
+            finish(op);
+        }
+    }
+
+    /** Fired by the scheduler thread when a retry's delay elapses; resubmits onto the dispatch pool. */
+    private void resubmit(Operation op) {
+        pendingRetries.decrementAndGet();
+        ExecutorService ex = executor;
+        try {
+            if (ex == null) {
+                // Pool torn down between scheduling and firing → drop without leaking.
+                droppedCount.incrementAndGet();
+                finish(op);
+                return;
+            }
+            ex.execute(() -> runAttempt(op));
+        } catch (Throwable t) {
+            // Widened from RejectedExecutionException: any failure on this path must still
+            // finish(op), or the future leaks into inFlight and the await barrier hangs.
             droppedCount.incrementAndGet();
             finish(op);
         }
@@ -241,7 +294,7 @@ public class NotificationDispatcher {
         if (value < 0) {
             return 0;
         }
-        return Math.min(value, 5);
+        return Math.min(value, SlackNotifierGlobalConfig.MAX_RETRIES_LIMIT);
     }
 
     private void finish(Operation op) {
@@ -249,12 +302,19 @@ public class NotificationDispatcher {
         op.future.complete(null);
     }
 
-    /** Test/diagnostic: number of notifications dropped (queue saturation / retry exhaustion). */
+    /**
+     * Test/diagnostic: number of notifications dropped due to pool unavailability — the
+     * dispatch queue being saturated or a pool torn down at shutdown. Cap-reached and
+     * retry-budget exhaustion are normal terminal outcomes and are NOT counted here.
+     */
     long droppedCount() {
         return droppedCount.get();
     }
 
-    /** Test barrier: waits until all in-flight notifications (including scheduled retries) finish. */
+    /**
+     * Test barrier: waits for the in-flight notifications (including any already-scheduled
+     * retries) captured at call time. Work enqueued after this snapshot is not awaited.
+     */
     void awaitAllDispatched(long timeout, @NonNull TimeUnit unit)
             throws InterruptedException, TimeoutException {
         CompletableFuture<?>[] snapshot = inFlight.toArray(new CompletableFuture<?>[0]);
@@ -274,10 +334,20 @@ public class NotificationDispatcher {
     }
 
     private void shutdownPools() {
-        shutdown(executor);
-        shutdown(scheduler);
-        executor = null;
-        scheduler = null;
+        ExecutorService ex;
+        ScheduledExecutorService sch;
+        synchronized (this) {
+            ex = executor;
+            sch = scheduler;
+            executor = null;
+            scheduler = null;
+            stopped = true;
+        }
+        // Drain outside the lock (awaitTermination blocks). Scheduler first: a retry
+        // scheduled during the shutdown window is then not resubmitted onto an executor
+        // that is already closing, avoiding an otherwise-avoidable drop.
+        shutdown(sch);
+        shutdown(ex);
     }
 
     private static void shutdown(@CheckForNull ExecutorService service) {
@@ -295,11 +365,15 @@ public class NotificationDispatcher {
         }
     }
 
-    /** Per-notification mutable state; {@code attemptsLeft} is only touched on dispatch threads. */
+    /** Per-notification mutable state handed between dispatch/scheduler threads across retries. */
     private static final class Operation {
         private final NotificationContext context;
         private final CompletableFuture<Void> future = new CompletableFuture<>();
-        private int attemptsLeft;
+        // Handed between executor pool threads across a retry. There is never concurrent
+        // mutation (one attempt runs at a time), so the non-atomic {@code --} is fine;
+        // volatile documents and guarantees cross-thread visibility of the handoff, which
+        // the executor submit's happens-before already establishes.
+        private volatile int attemptsLeft;
 
         Operation(NotificationContext context, int attemptsLeft) {
             this.context = context;

@@ -18,6 +18,7 @@ public class SlackGitBranchTokenMacro extends AbstractSlackRunMacro {
     @Override
     @NonNull
     protected String compute(@NonNull Run<?, ?> run, @NonNull TaskListener listener) {
-        return GitMacroSupport.branch(run, listener);
+        // Branch names are attacker-influenceable; escape mrkdwn control chars at the emit point.
+        return SlackText.escape(GitMacroSupport.branch(run, listener));
     }
 }

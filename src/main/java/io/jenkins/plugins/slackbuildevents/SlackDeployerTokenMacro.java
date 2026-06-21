@@ -21,11 +21,12 @@ public class SlackDeployerTokenMacro extends AbstractSlackRunMacro {
     @Override
     @NonNull
     protected String compute(@NonNull Run<?, ?> run, @NonNull TaskListener listener) {
+        // User id / upstream project names can carry mrkdwn control chars; escape at each emit point.
         for (Cause cause : run.getCauses()) {
             if (cause instanceof Cause.UserIdCause) {
                 String userId = ((Cause.UserIdCause) cause).getUserId();
                 if (userId != null && !userId.isEmpty()) {
-                    return userId;
+                    return SlackText.escape(userId);
                 }
             }
         }
@@ -33,10 +34,10 @@ public class SlackDeployerTokenMacro extends AbstractSlackRunMacro {
             if (cause instanceof Cause.UpstreamCause) {
                 String upstream = ((Cause.UpstreamCause) cause).getUpstreamProject();
                 if (upstream != null && !upstream.isEmpty()) {
-                    return upstream;
+                    return SlackText.escape(upstream);
                 }
             }
         }
-        return "Jenkins";
+        return SlackText.escape("Jenkins");
     }
 }
