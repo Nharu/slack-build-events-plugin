@@ -137,7 +137,7 @@ final class GitMacroSupport {
                 return action.getRevision().getHead().getName();
             }
         } catch (Throwable t) {
-            // scm-api absent; fall through.
+            // scm-api absent (NoClassDefFoundError) or revision unavailable; degrade gracefully.
         }
         return null;
     }

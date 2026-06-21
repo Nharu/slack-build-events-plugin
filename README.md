@@ -36,6 +36,11 @@ Configure under **Manage Jenkins → System → Slack Templated Notifier** (admi
   credential / per-event template overrides.
 - **Max retries on 429** — `0`–`5` (default `1`).
 
+> **Note — first-match is job-level, not event-level:** the first rule whose regex matches a job
+> governs that job entirely. Only that rule's per-event toggles are consulted; once a job matches a
+> rule, later rules are never evaluated for it — even for events the matched rule has turned off.
+> Order broad rules after narrow ones if a narrow rule needs its own event set.
+
 The webhook URL is a **Secret Text** (`StringCredentials`, `SYSTEM` scope) credential;
 the plugin looks it up at fire time, so rotation needs no restart.
 
@@ -88,6 +93,13 @@ credentials:
 
 All five are Run-attached, read-only, and side-effect-free, so they also work on
 pod/ephemeral agents where the workspace is gone by completion time.
+
+> **Note — prefer the `SLACK_*` macros for SCM-derived data.** The SCM-derived macros
+> (`${SLACK_GIT_BRANCH}`, `${SLACK_GIT_COMMIT}`, `${SLACK_DEPLOYER}`) escape Slack mrkdwn
+> control characters in their values, so an attacker-influenced branch name cannot inject
+> `<url|label>` link markup. A raw `${ENV,var="GIT_BRANCH"}` (or a build parameter) placed
+> directly into a custom template bypasses that escaping — use the provided `SLACK_*` macros
+> for SCM-derived values rather than raw env references.
 
 ## Versioning
 

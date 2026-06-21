@@ -74,18 +74,18 @@ public class SlackNotifyRunListener extends RunListener<Run<?, ?>> {
             }
 
             String webhookCredentialId =
-                    firstNonBlank(rule.getWebhookCredentialId(), config.getDefaultWebhookCredentialId());
+                    firstNonEmpty(rule.getWebhookCredentialId(), config.getDefaultWebhookCredentialId());
             if (webhookCredentialId == null) {
                 // No webhook configured anywhere → silent no-op.
                 return;
             }
-            String channel = firstNonBlank(rule.getChannel(), config.getDefaultChannel());
+            String channel = firstNonEmpty(rule.getChannel(), config.getDefaultChannel());
             String template = resolveTemplate(rule, config, event);
             String defaultColor = config.getDefaultColor();
             String color = (defaultColor != null && !defaultColor.isEmpty()) ? defaultColor : event.defaultColor();
 
             NotificationContext context =
-                    new NotificationContext(run, listener, event, channel, webhookCredentialId, template, color);
+                    new NotificationContext(run, listener, channel, webhookCredentialId, template, color);
             NotificationDispatcher.get().dispatch(context);
         } catch (RuntimeException e) {
             // Belt-and-suspenders: a listener must never break a build.
@@ -108,7 +108,7 @@ public class SlackNotifyRunListener extends RunListener<Run<?, ?>> {
     }
 
     @CheckForNull
-    private static String firstNonBlank(@CheckForNull String a, @CheckForNull String b) {
+    private static String firstNonEmpty(@CheckForNull String a, @CheckForNull String b) {
         if (a != null && !a.isEmpty()) {
             return a;
         }

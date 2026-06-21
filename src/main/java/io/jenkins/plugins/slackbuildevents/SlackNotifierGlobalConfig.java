@@ -11,9 +11,11 @@ import java.util.Collections;
 import java.util.List;
 import jenkins.model.GlobalConfiguration;
 import jenkins.model.Jenkins;
+import net.sf.json.JSONObject;
 import org.jenkinsci.Symbol;
 import org.kohsuke.stapler.DataBoundSetter;
 import org.kohsuke.stapler.QueryParameter;
+import org.kohsuke.stapler.StaplerRequest2;
 import org.kohsuke.stapler.verb.POST;
 
 /**
@@ -28,7 +30,7 @@ import org.kohsuke.stapler.verb.POST;
 public final class SlackNotifierGlobalConfig extends GlobalConfiguration {
 
     private static final int DEFAULT_MAX_RETRIES = 1;
-    private static final int MAX_RETRIES_LIMIT = 5;
+    static final int MAX_RETRIES_LIMIT = 5;
 
     private String defaultChannel;
     private String defaultWebhookCredentialId;
@@ -60,7 +62,6 @@ public final class SlackNotifierGlobalConfig extends GlobalConfiguration {
     @DataBoundSetter
     public void setDefaultChannel(String defaultChannel) {
         this.defaultChannel = Util.fixEmptyAndTrim(defaultChannel);
-        save();
     }
 
     @CheckForNull
@@ -71,7 +72,6 @@ public final class SlackNotifierGlobalConfig extends GlobalConfiguration {
     @DataBoundSetter
     public void setDefaultWebhookCredentialId(String defaultWebhookCredentialId) {
         this.defaultWebhookCredentialId = Util.fixEmptyAndTrim(defaultWebhookCredentialId);
-        save();
     }
 
     @NonNull
@@ -82,7 +82,6 @@ public final class SlackNotifierGlobalConfig extends GlobalConfiguration {
     @DataBoundSetter
     public void setRules(List<NotificationRule> rules) {
         this.rules = rules == null ? new ArrayList<>() : new ArrayList<>(rules);
-        save();
     }
 
     public int getMaxRetriesOn429() {
@@ -92,7 +91,6 @@ public final class SlackNotifierGlobalConfig extends GlobalConfiguration {
     @DataBoundSetter
     public void setMaxRetriesOn429(int maxRetriesOn429) {
         this.maxRetriesOn429 = clamp(maxRetriesOn429);
-        save();
     }
 
     @CheckForNull
@@ -103,7 +101,6 @@ public final class SlackNotifierGlobalConfig extends GlobalConfiguration {
     @DataBoundSetter
     public void setDefaultStartTemplate(String defaultStartTemplate) {
         this.defaultStartTemplate = Util.fixEmpty(defaultStartTemplate);
-        save();
     }
 
     @CheckForNull
@@ -114,7 +111,6 @@ public final class SlackNotifierGlobalConfig extends GlobalConfiguration {
     @DataBoundSetter
     public void setDefaultSuccessTemplate(String defaultSuccessTemplate) {
         this.defaultSuccessTemplate = Util.fixEmpty(defaultSuccessTemplate);
-        save();
     }
 
     @CheckForNull
@@ -125,7 +121,6 @@ public final class SlackNotifierGlobalConfig extends GlobalConfiguration {
     @DataBoundSetter
     public void setDefaultFailureTemplate(String defaultFailureTemplate) {
         this.defaultFailureTemplate = Util.fixEmpty(defaultFailureTemplate);
-        save();
     }
 
     @CheckForNull
@@ -136,7 +131,6 @@ public final class SlackNotifierGlobalConfig extends GlobalConfiguration {
     @DataBoundSetter
     public void setDefaultUnstableTemplate(String defaultUnstableTemplate) {
         this.defaultUnstableTemplate = Util.fixEmpty(defaultUnstableTemplate);
-        save();
     }
 
     @CheckForNull
@@ -147,7 +141,6 @@ public final class SlackNotifierGlobalConfig extends GlobalConfiguration {
     @DataBoundSetter
     public void setDefaultAbortedTemplate(String defaultAbortedTemplate) {
         this.defaultAbortedTemplate = Util.fixEmpty(defaultAbortedTemplate);
-        save();
     }
 
     @CheckForNull
@@ -158,7 +151,6 @@ public final class SlackNotifierGlobalConfig extends GlobalConfiguration {
     @DataBoundSetter
     public void setDefaultNotBuiltTemplate(String defaultNotBuiltTemplate) {
         this.defaultNotBuiltTemplate = Util.fixEmpty(defaultNotBuiltTemplate);
-        save();
     }
 
     @CheckForNull
@@ -169,7 +161,17 @@ public final class SlackNotifierGlobalConfig extends GlobalConfiguration {
     @DataBoundSetter
     public void setDefaultColor(String defaultColor) {
         this.defaultColor = Util.fixEmptyAndTrim(defaultColor);
+    }
+
+    @Override
+    public boolean configure(StaplerRequest2 req, JSONObject json) throws FormException {
+        // Bind all submitted fields at once, then persist a single time. The data-bound
+        // setters no longer call save() individually, so a form submit serializes config.xml
+        // once instead of once per field. JCasC applies the same setters directly (it does not
+        // route through configure()), so this is safe for both UI and JCasC paths.
+        req.bindJSON(this, json);
         save();
+        return true;
     }
 
     /** First rule (in list order) whose pattern full-matches the job, or {@code null}. */
