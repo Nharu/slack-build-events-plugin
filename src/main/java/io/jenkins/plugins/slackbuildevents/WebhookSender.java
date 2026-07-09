@@ -24,6 +24,9 @@ class WebhookSender {
     private final HttpClient client;
 
     WebhookSender() {
+        // Redirect guard: rely on the default followRedirects policy of NEVER. Do NOT add
+        // .followRedirects(NORMAL/ALWAYS) — a 30x could redirect a send-time-validated host to
+        // an internal one, bypassing the webhook host allowlist (SSRF hardening).
         this(HttpClient.newBuilder().connectTimeout(TIMEOUT).build());
     }
 

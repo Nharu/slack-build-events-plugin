@@ -8,6 +8,8 @@ import hudson.model.AbstractDescribableImpl;
 import hudson.model.Descriptor;
 import hudson.util.FormValidation;
 import hudson.util.ListBoxModel;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
 import jenkins.model.Jenkins;
@@ -25,6 +27,11 @@ import org.kohsuke.stapler.verb.POST;
  * <p>Field names are part of the JCasC serialization contract (getter/setter symmetry).
  */
 public class NotificationRule extends AbstractDescribableImpl<NotificationRule> {
+
+    private static final Logger LOGGER = Logger.getLogger(NotificationRule.class.getName());
+
+    /** Backtracking guard: max charAt reads in a single match before it is aborted (ReDoS). */
+    private static final long MATCH_STEP_BUDGET = 1_000_000L;
 
     private final String jobNamePattern;
     private String channel;
@@ -46,6 +53,10 @@ public class NotificationRule extends AbstractDescribableImpl<NotificationRule> 
 
     private transient Pattern compiled;
     private transient boolean compileAttempted;
+    // Plain (non-atomic) transient: reset to false on XStream deserialization, so the budget-exceeded
+    // WARNING path can never NPE the way a null AtomicBoolean reference would. A benign duplicate log
+    // under a race is accepted; mirrors the compileAttempted transient convention above.
+    private transient boolean budgetWarned;
 
     @DataBoundConstructor
     public NotificationRule(String jobNamePattern) {
@@ -190,10 +201,35 @@ public class NotificationRule extends AbstractDescribableImpl<NotificationRule> 
         this.notBuiltTemplate = Util.fixEmpty(notBuiltTemplate);
     }
 
-    /** Full-match of this rule's (cached, precompiled) pattern against the job full name. */
+    /**
+     * Full-match of this rule's (cached, precompiled) pattern against the job full name, bounded by
+     * a backtracking step budget so a pathological pattern cannot pin the dispatch thread.
+     */
     boolean matches(@NonNull String jobFullName) {
+        return matches(jobFullName, MATCH_STEP_BUDGET);
+    }
+
+    /** Test seam: {@link #matches(String)} with an explicit step budget. */
+    boolean matches(@NonNull String jobFullName, long stepBudget) {
         Pattern pattern = pattern();
-        return pattern != null && pattern.matcher(jobFullName).matches();
+        if (pattern == null) {
+            return false;
+        }
+        try {
+            return pattern.matcher(new BoundedCharSequence(jobFullName, stepBudget)).matches();
+        } catch (MatchBudgetExceededException e) {
+            // Fail-closed: a runaway match is treated as no-match — the same branch as an invalid
+            // regex — so firstMatch keeps consulting the remaining rules instead of hanging.
+            if (!budgetWarned) {
+                budgetWarned = true;
+                LOGGER.log(
+                        Level.WARNING,
+                        "Slack notification rule pattern exceeded its match step budget and was skipped "
+                                + "(possible ReDoS); pattern: {0}",
+                        jobNamePattern);
+            }
+            return false;
+        }
     }
 
     private synchronized Pattern pattern() {
@@ -206,6 +242,54 @@ public class NotificationRule extends AbstractDescribableImpl<NotificationRule> 
             }
         }
         return compiled;
+    }
+
+    /**
+     * Wraps the job full name and counts {@code charAt} calls, throwing once a match consumes more
+     * than {@code budget} reads. Backtracking re-reads positions, so the read count is a monotone
+     * proxy for backtracking work across every pathological pattern family.
+     */
+    private static final class BoundedCharSequence implements CharSequence {
+        private final String value;
+        private final long budget;
+        private long reads;
+
+        BoundedCharSequence(String value, long budget) {
+            this.value = value;
+            this.budget = budget;
+        }
+
+        @Override
+        public int length() {
+            return value.length();
+        }
+
+        @Override
+        public char charAt(int index) {
+            if (++reads > budget) {
+                throw new MatchBudgetExceededException();
+            }
+            return value.charAt(index);
+        }
+
+        @Override
+        public CharSequence subSequence(int start, int end) {
+            return value.subSequence(start, end);
+        }
+
+        @Override
+        public String toString() {
+            return value;
+        }
+    }
+
+    /** Stackless signal that a match exceeded its step budget; never escapes {@link #matches(String)}. */
+    private static final class MatchBudgetExceededException extends RuntimeException {
+        private static final long serialVersionUID = 1L;
+
+        MatchBudgetExceededException() {
+            super(null, null, false, false);
+        }
     }
 
     boolean isEnabledFor(@NonNull EventType event) {
@@ -251,6 +335,16 @@ public class NotificationRule extends AbstractDescribableImpl<NotificationRule> 
     @Symbol("rule")
     public static class DescriptorImpl extends Descriptor<NotificationRule> {
 
+        /** Config-time self-check probe: bounded like the runtime guard but tighter, over a fixed input. */
+        private static final long PROBE_STEP_BUDGET = 200_000L;
+
+        private static final String PROBE_INPUT = "a".repeat(48) + "!";
+
+        /** Tier-1 static hints: backreference, a group-quantifier immediately re-quantified, big counted repeat. */
+        private static final Pattern BACKREF = Pattern.compile(".*\\\\[1-9].*", Pattern.DOTALL);
+        private static final Pattern NESTED_QUANTIFIER = Pattern.compile(".*\\([^()]*[+*][^()]*\\)[+*].*", Pattern.DOTALL);
+        private static final Pattern LARGE_COUNTED = Pattern.compile(".*\\{\\s*\\d{3,}.*", Pattern.DOTALL);
+
         @Override
         @NonNull
         public String getDisplayName() {
@@ -263,10 +357,29 @@ public class NotificationRule extends AbstractDescribableImpl<NotificationRule> 
             if (Util.fixEmptyAndTrim(value) == null) {
                 return FormValidation.error("A job name pattern is required.");
             }
+            Pattern compiled;
             try {
-                Pattern.compile(value);
+                compiled = Pattern.compile(value);
             } catch (PatternSyntaxException e) {
                 return FormValidation.error("Invalid regular expression: " + e.getMessage());
+            }
+            // Tier-2 (authoritative): run the real engine against a synthetic breaker under a small
+            // budget; catastrophic backtracking aborts and is surfaced as a warning (version-accurate).
+            try {
+                compiled.matcher(new BoundedCharSequence(PROBE_INPUT, PROBE_STEP_BUDGET)).matches();
+            } catch (MatchBudgetExceededException e) {
+                return FormValidation.warning(
+                        "This pattern back-tracks catastrophically on a synthetic input and would be "
+                                + "aborted at match time (possible ReDoS); consider simplifying it.");
+            }
+            // Tier-1 (static hint): shapes commonly associated with pathological backtracking.
+            if (BACKREF.matcher(value).matches()
+                    || NESTED_QUANTIFIER.matcher(value).matches()
+                    || LARGE_COUNTED.matcher(value).matches()) {
+                return FormValidation.warning(
+                        "This pattern contains a shape (nested quantifier, large counted repetition, or "
+                                + "backreference) that can back-track expensively; matching is step-limited "
+                                + "at runtime, but consider simplifying it.");
             }
             return FormValidation.ok(
                     "Full-matched against the job full name; include folder separators '/' "
@@ -275,6 +388,12 @@ public class NotificationRule extends AbstractDescribableImpl<NotificationRule> 
 
         public ListBoxModel doFillWebhookCredentialIdItems(@QueryParameter String webhookCredentialId) {
             return WebhookCredentials.fillItems(webhookCredentialId);
+        }
+
+        @POST
+        public FormValidation doCheckWebhookCredentialId(@QueryParameter String value) {
+            Jenkins.get().checkPermission(Jenkins.ADMINISTER);
+            return WebhookCredentials.checkUrlPolicy(value);
         }
     }
 }

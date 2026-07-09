@@ -3,6 +3,10 @@ unclassified:
     defaultChannel: "#jenkins"
     defaultWebhookCredentialId: "slack-webhook-url"
     maxRetriesOn429: 2
+    httpsOnly: true
+    webhookHostAllowlist:
+      - "HOOKS.slack.com"
+      - "mattermost.internal"
     rules:
       - jobNamePattern: "dev/server.*"
         notifyStart: true

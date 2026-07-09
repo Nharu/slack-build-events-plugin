@@ -12,6 +12,7 @@ import io.jenkins.plugins.casc.misc.ConfiguredWithCode;
 import io.jenkins.plugins.casc.misc.JenkinsConfiguredWithCodeRule;
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import org.junit.Rule;
 import org.junit.Test;
 
@@ -29,6 +30,9 @@ public class JCasCRoundTripTest {
         assertEquals("#jenkins", config.getDefaultChannel());
         assertEquals("slack-webhook-url", config.getDefaultWebhookCredentialId());
         assertEquals(2, config.getMaxRetriesOn429());
+        assertTrue(config.isHttpsOnly());
+        // Stored verbatim — case is preserved (normalization happens only at compare time).
+        assertEquals(List.of("HOOKS.slack.com", "mattermost.internal"), config.getWebhookHostAllowlist());
         assertEquals(1, config.getRules().size());
 
         NotificationRule rule = config.getRules().get(0);
@@ -47,6 +51,8 @@ public class JCasCRoundTripTest {
 
         assertThat(exported, containsString("slackTemplatedNotifier"));
         assertThat(exported, containsString("dev/server.*"));
+        // Allowlist is exported verbatim, preserving the original case (export == import).
+        assertThat(exported, containsString("HOOKS.slack.com"));
         // The raw webhook secret must never appear in exported YAML.
         assertThat(exported, not(containsString("https://hooks.slack.com/SUPER/SECRET")));
     }

@@ -165,6 +165,19 @@ public class NotificationDispatcher {
                 finish(op);
                 return;
             }
+            // SSRF hardening at the authoritative send point (a stub sender would bypass a
+            // WebhookSender-level check). null config → unrestricted, mirroring currentMaxRetries.
+            SlackNotifierGlobalConfig config = SlackNotifierGlobalConfig.get();
+            if (config != null
+                    && !WebhookUrlPolicy.isAllowed(webhookUrl, config.isHttpsOnly(), config.getWebhookHostAllowlist())) {
+                // Log scheme+host only — never the secret path/token — then terminate best-effort.
+                LOGGER.log(
+                        Level.WARNING,
+                        "Slack notification blocked by webhook URL policy: {0}",
+                        WebhookUrlPolicy.describeSafely(webhookUrl));
+                finish(op);
+                return;
+            }
             String text = render(op.context);
             String json = SlackMessage.build(op.context.channel(), op.context.color(), text);
             WebhookSender.Response response = sender.send(webhookUrl, json);

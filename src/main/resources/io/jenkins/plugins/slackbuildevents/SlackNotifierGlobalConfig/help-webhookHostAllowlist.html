@@ -1,0 +1,19 @@
+<div>
+  Optional SSRF hardening. When <b>empty</b> (default), any webhook host is allowed —
+  the plugin's historical behavior. When one or more entries are present, a webhook URL
+  is only sent if its host <b>suffix-matches</b> an entry: the host equals the entry, or
+  ends with <code>.</code> + the entry. So <code>slack.com</code> matches
+  <code>hooks.slack.com</code> but not <code>evilslack.com</code>. Comparison is
+  case-insensitive and IDN-normalized; entries are stored verbatim.
+  <p>
+  Known limitations (P3, administrator-only threat model):
+  </p>
+  <ul>
+    <li>IP-literal entries are plain suffix matches only — <b>no CIDR</b>
+        (<code>10.0.0.0</code> does not match <code>10.0.0.1</code>).</li>
+    <li>IPv6 literals must be entered in the bracketed form as
+        <code>URI.getHost()</code> returns them, e.g. <code>[::1]</code>.</li>
+    <li>The check runs against the resolved <em>name</em>; a name that later re-resolves
+        to an internal IP (DNS rebinding) is an accepted residual risk.</li>
+  </ul>
+</div>
