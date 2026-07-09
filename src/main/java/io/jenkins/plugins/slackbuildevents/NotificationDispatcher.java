@@ -237,6 +237,8 @@ public class NotificationDispatcher {
 
     @NonNull
     private String render(@NonNull NotificationContext context) {
+        // Install the start-time branch snapshot for the duration of this render only.
+        GitMacroSupport.setStartBranchHint(context.branchHint());
         try {
             // Single pass: substituted values are not re-scanned, so user-controlled env
             // cannot inject further macros.
@@ -244,6 +246,10 @@ public class NotificationDispatcher {
         } catch (Exception e) {
             LOGGER.log(Level.FINE, "Template expansion failed; sending raw template", e);
             return context.template();
+        } finally {
+            // Clear on EVERY exit path (including the raw-template fallback above) so the hint never
+            // leaks to the next notification rendered on this pooled worker or across a retry hand-off.
+            GitMacroSupport.clearStartBranchHint();
         }
     }
 
