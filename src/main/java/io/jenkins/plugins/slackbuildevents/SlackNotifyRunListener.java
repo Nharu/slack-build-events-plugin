@@ -84,8 +84,14 @@ public class SlackNotifyRunListener extends RunListener<Run<?, ?>> {
             String defaultColor = config.getDefaultColor();
             String color = (defaultColor != null && !defaultColor.isEmpty()) ? defaultColor : event.defaultColor();
 
-            NotificationContext context =
-                    new NotificationContext(run, listener, channel, webhookCredentialId, template, color);
+            // Start-time only: snapshot the intended branch on the event thread (before checkout scm),
+            // so the async renderer resolves it deterministically instead of racing checkout to N/A.
+            // captureStartBranch swallows every Throwable, so a missing git/workflow class cannot
+            // escape here (handle() only catches RuntimeException).
+            String branchHint =
+                    (event == EventType.START) ? GitMacroSupport.captureStartBranch(run, listener) : null;
+            NotificationContext context = new NotificationContext(
+                    run, listener, channel, webhookCredentialId, template, color, branchHint);
             NotificationDispatcher.get().dispatch(context);
         } catch (RuntimeException e) {
             // Belt-and-suspenders: a listener must never break a build.
