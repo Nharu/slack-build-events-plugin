@@ -1,5 +1,6 @@
 package io.jenkins.plugins.slackbuildevents;
 
+import edu.umd.cs.findbugs.annotations.CheckForNull;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -32,6 +33,11 @@ class TestWebhookSender extends WebhookSender {
     /** Convenience for a 429 with a {@code Retry-After} of {@code 0} (immediate retry). */
     static Response status429RetryNow() {
         return new Response(429, "0");
+    }
+
+    /** A 429 carrying an arbitrary Retry-After header (null ⇒ header absent). */
+    static Response status429RetryAfter(@CheckForNull String retryAfter) {
+        return new Response(429, retryAfter);
     }
 
     static Response status(int code) {

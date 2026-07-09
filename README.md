@@ -85,14 +85,20 @@ credentials:
 
 | Macro                | Value                                                                 |
 | -------------------- | --------------------------------------------------------------------- |
-| `${SLACK_DURATION}`  | Build duration (locale-safe), computed live if not yet recorded.      |
+| `${SLACK_DURATION}`  | Build duration in a compact, language-neutral format (e.g. `2h 5m`), computed live if not yet recorded. |
 | `${SLACK_DEPLOYER}`  | Triggering user id → upstream cause → `Jenkins`.                       |
 | `${SLACK_GIT_COMMIT}`| Short SHA from env → git `BuildData` → SCM revision → empty.           |
-| `${SLACK_GIT_BRANCH}`| Branch from env → git `BuildData` → SCM revision → `N/A`.              |
+| `${SLACK_GIT_BRANCH}`| Start snapshot → env → git `BuildData` → SCM revision → `N/A`.         |
 | `${SLACK_BUILD_URL}` | Absolute build URL, always normalized to a trailing `/`.              |
 
 All five are Run-attached, read-only, and side-effect-free, so they also work on
 pod/ephemeral agents where the workspace is gone by completion time.
+
+> **Note — start vs. completion branch.** At build **start** (before `checkout scm`), `${SLACK_GIT_BRANCH}`
+> is a best-effort snapshot of the *intended* branch — env `BRANCH_NAME` for multibranch, otherwise the
+> single configured GitSCM spec (e.g. `*/main` → `main`). The **completion** notification reports the
+> *actual* checked-out ref. The two can differ (tag/detached-HEAD builds, specs referencing non-parameter
+> env, or a pipeline that checks out a different repo/branch than its Jenkinsfile source).
 
 > **Note — prefer the `SLACK_*` macros for SCM-derived data.** The SCM-derived macros
 > (`${SLACK_GIT_BRANCH}`, `${SLACK_GIT_COMMIT}`, `${SLACK_DEPLOYER}`) escape Slack mrkdwn

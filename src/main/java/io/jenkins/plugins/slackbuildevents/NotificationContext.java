@@ -28,6 +28,9 @@ final class NotificationContext {
     private final String template;
     @NonNull
     private final String color;
+    /** Start-time branch snapshot, captured on the event thread; {@code null} for completion events. */
+    @CheckForNull
+    private final String branchHint;
 
     NotificationContext(
             @NonNull Run<?, ?> run,
@@ -35,13 +38,15 @@ final class NotificationContext {
             @CheckForNull String channel,
             @NonNull String webhookCredentialId,
             @NonNull String template,
-            @NonNull String color) {
+            @NonNull String color,
+            @CheckForNull String branchHint) {
         this.run = run;
         this.listener = listener;
         this.channel = channel;
         this.webhookCredentialId = webhookCredentialId;
         this.template = template;
         this.color = color;
+        this.branchHint = branchHint;
     }
 
     @NonNull
@@ -72,5 +77,10 @@ final class NotificationContext {
     @NonNull
     String color() {
         return color;
+    }
+
+    @CheckForNull
+    String branchHint() {
+        return branchHint;
     }
 }
