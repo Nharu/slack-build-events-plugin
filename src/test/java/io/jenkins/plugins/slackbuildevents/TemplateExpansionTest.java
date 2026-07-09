@@ -4,13 +4,20 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 
+import hudson.model.FreeStyleBuild;
 import hudson.model.FreeStyleProject;
 import hudson.model.ParametersAction;
 import hudson.model.ParametersDefinitionProperty;
+import hudson.model.Run;
 import hudson.model.StringParameterDefinition;
 import hudson.model.StringParameterValue;
+import hudson.model.TaskListener;
+import java.lang.reflect.Field;
 import java.util.List;
+import java.util.Locale;
+import java.util.regex.Pattern;
 import net.sf.json.JSONObject;
 import org.junit.Before;
 import org.junit.Rule;
@@ -111,6 +118,46 @@ public class TemplateExpansionTest {
         assertThat(text, containsString("|Console>"));
         // Branch value escaped.
         assertThat(text, containsString("branch=x&lt;y&gt;"));
+    }
+
+    @Test
+    public void durationMacroExpandsLocaleNeutrallyEvenUnderGermanDefault() throws Exception {
+        // Build first with no rule installed, so the build's own completion dispatches nothing.
+        // That lets us inject a large recorded duration and fire the notification deterministically,
+        // instead of relying on the real (sub-second) elapsed time — which would never surface the
+        // localized "Stunden"/"Minuten" words and so make the regression assertion vacuous.
+        FreeStyleBuild build = j.buildAndAssertSuccess(j.createFreeStyleProject("dur-e2e"));
+        setLongField(build, "duration", 7_503_000L); // 2h 5m 3s
+
+        NotificationRule rule = SlackTestHelpers.rule("dur-e2e", List.of("success"));
+        rule.setSuccessTemplate("dur=${SLACK_DURATION}");
+        SlackTestHelpers.config().setRules(List.of(rule));
+
+        Locale saved = Locale.getDefault();
+        try {
+            // The dispatch thread renders under whatever the JVM default is; a German default is what
+            // makes the core formatter emit "2 Stunden 5 Minuten". The language-neutral formatter must
+            // ignore the locale and render "2h 5m" regardless.
+            Locale.setDefault(Locale.GERMANY);
+            new SlackNotifyRunListener().onCompleted(build, TaskListener.NULL);
+            SlackTestHelpers.awaitDispatch();
+        } finally {
+            Locale.setDefault(saved);
+        }
+
+        String text = text(sender.bodies.get(0));
+        assertThat(text, containsString("dur=2h 5m"));
+        assertThat(text, not(containsString("Stunden")));
+        assertThat(text, not(containsString("Minuten")));
+        assertTrue(
+                "duration should render as language-neutral symbols, was: " + text,
+                Pattern.compile("dur=\\d+(ms|s|m|h|d)( \\d+(ms|s|m|h|d))?").matcher(text).find());
+    }
+
+    private static void setLongField(Run<?, ?> build, String name, long value) throws Exception {
+        Field field = Run.class.getDeclaredField(name);
+        field.setAccessible(true);
+        field.setLong(build, value);
     }
 
     private static String text(String body) {
