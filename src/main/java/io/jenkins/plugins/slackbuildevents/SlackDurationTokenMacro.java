@@ -2,7 +2,6 @@ package io.jenkins.plugins.slackbuildevents;
 
 import edu.umd.cs.findbugs.annotations.NonNull;
 import hudson.Extension;
-import hudson.Util;
 import hudson.model.Run;
 import hudson.model.TaskListener;
 
@@ -29,6 +28,6 @@ public class SlackDurationTokenMacro extends AbstractSlackRunMacro {
         if (duration < 0L) {
             duration = 0L;
         }
-        return Util.getTimeSpanString(duration);
+        return DurationFormat.format(duration);
     }
 }
