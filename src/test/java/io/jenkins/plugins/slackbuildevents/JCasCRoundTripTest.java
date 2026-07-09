@@ -105,7 +105,12 @@ public class JCasCRoundTripTest {
         CNode node = getUnclassifiedRoot(context).get("slackTemplatedNotifier");
         String exported = toYamlString(node);
         String expected = toStringFromYamlFile(this, "casc-roundtrip-expected.yml");
-        assertThat(exported, is(expected));
+        assertThat(
+                "exported YAML drifted from casc-roundtrip-expected.yml — if this change is intended "
+                        + "(a product change to the serialized fields, or a JCasC/snakeyaml upgrade), regenerate "
+                        + "the fixture per the regeneration note in this test; otherwise it may be a product regression",
+                exported,
+                is(expected));
     }
 
     @Test
