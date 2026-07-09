@@ -1,19 +1,51 @@
 unclassified:
   slackTemplatedNotifier:
-    defaultChannel: "#jenkins"
-    defaultWebhookCredentialId: "slack-webhook-url"
-    maxRetriesOn429: 2
+    defaultChannel: "#builds"
+    defaultColor: "#36a64f"
+    defaultWebhookCredentialId: "slack-default-cred"
+    maxRetriesOn429: 4
+    defaultStartTemplate: "global-start-tmpl"
+    defaultSuccessTemplate: "global-success-tmpl"
+    defaultFailureTemplate: "global-failure-tmpl"
+    defaultUnstableTemplate: "global-unstable-tmpl"
+    defaultAbortedTemplate: "global-aborted-tmpl"
+    defaultNotBuiltTemplate: "global-notbuilt-tmpl"
     rules:
-      - jobNamePattern: "dev/server.*"
+      # Insertion order zeta -> alpha is the reverse of alphabetical order, so an accidental
+      # alphabetical-sort regression would flip zeta/alpha and fail exportMatchesExpectedStructurally.
+      - jobNamePattern: "zeta/deploy-.*"
+        channel: "#zeta-alerts"
+        webhookCredentialId: "slack-zeta-cred"
         notifyStart: true
         notifySuccess: true
         notifyFailure: true
+        notifyUnstable: true
+        notifyAborted: true
+        notifyNotBuilt: true
+        startTemplate: "z-start"
+        successTemplate: "z-success"
+        failureTemplate: "z-failure"
+        unstableTemplate: "z-unstable"
+        abortedTemplate: "z-aborted"
+        notBuiltTemplate: "z-notbuilt"
+      - jobNamePattern: "alpha/build-.*"
+        channel: "#alpha-ci"
+        webhookCredentialId: "slack-alpha-cred"
+        notifySuccess: true
+        notifyFailure: true
+        notifyAborted: true
+        startTemplate: "a-start"
+        successTemplate: "a-success"
+        failureTemplate: "a-failure"
+        unstableTemplate: "a-unstable"
+        abortedTemplate: "a-aborted"
+        notBuiltTemplate: "a-notbuilt"
 credentials:
   system:
     domainCredentials:
       - credentials:
           - string:
               scope: SYSTEM
-              id: "slack-webhook-url"
+              id: "slack-default-cred"
               secret: "https://hooks.slack.com/SUPER/SECRET"
               description: "Slack incoming webhook"
