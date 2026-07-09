@@ -85,7 +85,7 @@ credentials:
 
 | Macro                | Value                                                                 |
 | -------------------- | --------------------------------------------------------------------- |
-| `${SLACK_DURATION}`  | Build duration (locale-safe), computed live if not yet recorded.      |
+| `${SLACK_DURATION}`  | Build duration in a compact, language-neutral format (e.g. `2h 5m`), computed live if not yet recorded. |
 | `${SLACK_DEPLOYER}`  | Triggering user id → upstream cause → `Jenkins`.                       |
 | `${SLACK_GIT_COMMIT}`| Short SHA from env → git `BuildData` → SCM revision → empty.           |
 | `${SLACK_GIT_BRANCH}`| Start snapshot → env → git `BuildData` → SCM revision → `N/A`.         |
