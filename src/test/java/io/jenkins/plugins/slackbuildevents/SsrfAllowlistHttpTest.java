@@ -27,6 +27,9 @@ import org.jvnet.hudson.test.LoggerRule;
  * Send-time SSRF enforcement over real HTTP: a host outside the allowlist (or a plain-http URL
  * under https-only) is never POSTed, and the block WARNING exposes only scheme+host, not the
  * secret webhook path/token.
+ *
+ * <p>The positive AND-combo (host in allowlist AND https-only satisfied together → allowed) is
+ * covered at the unit level by {@link WebhookUrlPolicyTest}, so it is not re-exercised end-to-end here.
  */
 public class SsrfAllowlistHttpTest {
 

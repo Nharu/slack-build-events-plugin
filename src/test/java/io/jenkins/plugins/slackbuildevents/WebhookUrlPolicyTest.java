@@ -104,11 +104,35 @@ public class WebhookUrlPolicyTest {
         assertTrue(HostAllowlistMatcher.matches(null, List.of()));
     }
 
+    // --- whitespace-padded entries are stripped at compare time (stored verbatim) --------
+
+    @Test
+    public void paddedAllowlistEntryMatchesHost() {
+        // A legitimate entry the admin typed with trailing/leading spaces must still match.
+        assertTrue(HostAllowlistMatcher.matches("hooks.slack.com", List.of("hooks.slack.com ")));
+        assertTrue(HostAllowlistMatcher.matches("hooks.slack.com", List.of("  hooks.slack.com  ")));
+    }
+
+    @Test
+    public void blankAllowlistEntryIsInertAmongRealEntries() {
+        // A blank entry normalizes to "" and never matches, but the real entry still does.
+        assertTrue(HostAllowlistMatcher.matches("hooks.slack.com", List.of("   ", "hooks.slack.com")));
+        assertFalse(HostAllowlistMatcher.matches("other.example", List.of("   ", "hooks.slack.com")));
+    }
+
+    @Test
+    public void allBlankAllowlistFailsClosed() {
+        // A non-empty list of only-blank entries must not become "unrestricted" (fail-closed).
+        assertFalse(HostAllowlistMatcher.matches("hooks.slack.com", List.of(" ", "   ")));
+    }
+
     // --- describeSafely never leaks path / userinfo -------------------------------------
 
     @Test
     public void describeSafelyExposesOnlySchemeAndHost() {
         assertEquals("https://hooks.slack.com", WebhookUrlPolicy.describeSafely("https://hooks.slack.com/T/B/SECRET"));
         assertEquals("(unparseable webhook URL)", WebhookUrlPolicy.describeSafely("ht!tp://x"));
+        // userinfo (which can carry a secret token) must be stripped — scheme+host only.
+        assertEquals("https://host", WebhookUrlPolicy.describeSafely("https://sekret@host/p"));
     }
 }

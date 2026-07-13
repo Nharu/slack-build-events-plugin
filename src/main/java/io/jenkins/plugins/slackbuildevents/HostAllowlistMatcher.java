@@ -44,17 +44,19 @@ final class HostAllowlistMatcher {
     }
 
     /**
-     * Lowercase (ROOT), strip a single trailing dot, then IDN A-label. Returns {@code null} if the
-     * input is null or {@code IDN.toASCII} rejects it (empty label / overlong label); the empty
-     * string and IPv6 bracket / IP literals pass through unchanged and are handled by the caller's
-     * suffix rule.
+     * Strip surrounding whitespace, lowercase (ROOT), strip a single trailing dot, then IDN A-label.
+     * Returns {@code null} if the input is null or {@code IDN.toASCII} rejects it (empty label /
+     * overlong label). The strip is at compare time only (stored entries stay verbatim), so an entry
+     * a user padded with spaces still matches; an all-whitespace or empty entry normalizes to
+     * {@code ""} which the caller's suffix rule never matches (fail-closed). IPv6 bracket / IP
+     * literals pass through unchanged.
      */
     @CheckForNull
     private static String normalize(@CheckForNull String value) {
         if (value == null) {
             return null;
         }
-        String s = value.toLowerCase(Locale.ROOT);
+        String s = value.strip().toLowerCase(Locale.ROOT);
         if (s.endsWith(".")) {
             s = s.substring(0, s.length() - 1);
         }

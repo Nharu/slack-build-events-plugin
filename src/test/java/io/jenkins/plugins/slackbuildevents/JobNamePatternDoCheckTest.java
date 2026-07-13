@@ -55,4 +55,25 @@ public class JobNamePatternDoCheckTest {
     public void errorOnEmptyIsPreserved() {
         assertEquals(FormValidation.Kind.ERROR, descriptor.doCheckJobNamePattern("").kind);
     }
+
+    @Test
+    public void soeShapePatternsWarn() {
+        // alternation/optional-under-star: flagged by the SOE_SHAPE static hint and the 256KB probe.
+        assertEquals(FormValidation.Kind.WARNING, descriptor.doCheckJobNamePattern("(a|a)*").kind);
+        assertEquals(FormValidation.Kind.WARNING, descriptor.doCheckJobNamePattern("(a?)*").kind);
+        assertEquals(FormValidation.Kind.WARNING, descriptor.doCheckJobNamePattern("(a|aa)+").kind);
+    }
+
+    @Test
+    public void nestedParenOverflowIsCaughtByProbe() {
+        // SOE_SHAPE misses nested parens, but the probe overflows → WARNING (probe/static complement).
+        assertEquals(FormValidation.Kind.WARNING, descriptor.doCheckJobNamePattern("((a|a))*").kind);
+    }
+
+    @Test
+    public void benignPatternsProduceNoFalsePositive() {
+        assertEquals(FormValidation.Kind.OK, descriptor.doCheckJobNamePattern(".*").kind);
+        assertEquals(FormValidation.Kind.OK, descriptor.doCheckJobNamePattern("team/.*").kind);
+        assertEquals(FormValidation.Kind.OK, descriptor.doCheckJobNamePattern("(https?|ftp)://.*").kind);
+    }
 }

@@ -8,6 +8,7 @@ import hudson.model.AbstractDescribableImpl;
 import hudson.model.Descriptor;
 import hudson.util.FormValidation;
 import hudson.util.ListBoxModel;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.regex.Pattern;
@@ -33,6 +34,14 @@ public class NotificationRule extends AbstractDescribableImpl<NotificationRule> 
     /** Backtracking guard: max charAt reads in a single match before it is aborted (ReDoS). */
     private static final long MATCH_STEP_BUDGET = 1_000_000L;
 
+    /**
+     * Upper bound on the job full name length fed to the matcher. A pathological pattern whose engine
+     * recursion overflows the stack (e.g. {@code (a|a)*}) can throw {@link StackOverflowError} after
+     * only a few thousand reads — below the step budget — so a length guard deterministically prevents
+     * reaching that depth. Well above any legitimate (deep folder) job name.
+     */
+    private static final int MAX_MATCH_INPUT_LENGTH = 1024;
+
     private final String jobNamePattern;
     private String channel;
     private String webhookCredentialId;
@@ -53,10 +62,11 @@ public class NotificationRule extends AbstractDescribableImpl<NotificationRule> 
 
     private transient Pattern compiled;
     private transient boolean compileAttempted;
-    // Plain (non-atomic) transient: reset to false on XStream deserialization, so the budget-exceeded
-    // WARNING path can never NPE the way a null AtomicBoolean reference would. A benign duplicate log
-    // under a race is accepted; mirrors the compileAttempted transient convention above.
-    private transient boolean budgetWarned;
+    // Shared dedup flag for all three match-guard WARNING paths (step budget, stack overflow, input
+    // length): one WARNING per rule. Plain (non-atomic) transient: reset to false on XStream
+    // deserialization, so no path can NPE the way a null AtomicBoolean reference would; a benign
+    // duplicate log under a race is accepted. Mirrors the compileAttempted transient convention above.
+    private transient boolean matchGuardWarned;
 
     @DataBoundConstructor
     public NotificationRule(String jobNamePattern) {
@@ -211,25 +221,50 @@ public class NotificationRule extends AbstractDescribableImpl<NotificationRule> 
 
     /** Test seam: {@link #matches(String)} with an explicit step budget. */
     boolean matches(@NonNull String jobFullName, long stepBudget) {
+        // Input length guard (before the matcher): deterministically prevents a stack-overflowing
+        // pattern from reaching engine-recursion depth, which can precede the step budget. Log the
+        // length and a bounded prefix only — never the full name — so a legitimately long (deep
+        // folder) job that keeps hitting this guard is still identifiable without log amplification.
+        if (jobFullName.length() > MAX_MATCH_INPUT_LENGTH) {
+            if (!matchGuardWarned) {
+                matchGuardWarned = true;
+                LOGGER.log(
+                        Level.WARNING,
+                        "Slack notification rule skipped: job full name length {0} exceeds the match input "
+                                + "limit {1}; name prefix: {2}",
+                        new Object[] {jobFullName.length(), MAX_MATCH_INPUT_LENGTH, prefix(jobFullName)});
+            }
+            return false;
+        }
         Pattern pattern = pattern();
         if (pattern == null) {
             return false;
         }
         try {
             return pattern.matcher(new BoundedCharSequence(jobFullName, stepBudget)).matches();
-        } catch (MatchBudgetExceededException e) {
-            // Fail-closed: a runaway match is treated as no-match — the same branch as an invalid
-            // regex — so firstMatch keeps consulting the remaining rules instead of hanging.
-            if (!budgetWarned) {
-                budgetWarned = true;
+        } catch (MatchBudgetExceededException | StackOverflowError e) {
+            // Fail-closed: a runaway match (step budget exceeded) or a stack-overflowing engine
+            // recursion is treated as no-match — the same branch as an invalid regex — so firstMatch
+            // keeps consulting the remaining rules instead of the loop being aborted mid-way.
+            if (!matchGuardWarned) {
+                matchGuardWarned = true;
                 LOGGER.log(
                         Level.WARNING,
-                        "Slack notification rule pattern exceeded its match step budget and was skipped "
-                                + "(possible ReDoS); pattern: {0}",
+                        e instanceof StackOverflowError
+                                ? "Slack notification rule pattern overflowed the stack and was skipped "
+                                        + "(possible ReDoS); pattern: {0}"
+                                : "Slack notification rule pattern exceeded its match step budget and was "
+                                        + "skipped (possible ReDoS); pattern: {0}",
                         jobNamePattern);
             }
             return false;
         }
+    }
+
+    /** Bounded, safe-to-log prefix of a job full name (never the whole name). */
+    @NonNull
+    private static String prefix(@NonNull String jobFullName) {
+        return jobFullName.substring(0, Math.min(128, jobFullName.length()));
     }
 
     private synchronized Pattern pattern() {
@@ -274,7 +309,9 @@ public class NotificationRule extends AbstractDescribableImpl<NotificationRule> 
 
         @Override
         public CharSequence subSequence(int start, int end) {
-            return value.subSequence(start, end);
+            // matches() never calls this. Fail loudly so a future group-extraction use that slips in
+            // is caught at development time rather than silently bypassing the step budget (uncounted).
+            throw new UnsupportedOperationException("BoundedCharSequence.subSequence is not supported");
         }
 
         @Override
@@ -344,6 +381,16 @@ public class NotificationRule extends AbstractDescribableImpl<NotificationRule> 
         private static final Pattern BACKREF = Pattern.compile(".*\\\\[1-9].*", Pattern.DOTALL);
         private static final Pattern NESTED_QUANTIFIER = Pattern.compile(".*\\([^()]*[+*][^()]*\\)[+*].*", Pattern.DOTALL);
         private static final Pattern LARGE_COUNTED = Pattern.compile(".*\\{\\s*\\d{3,}.*", Pattern.DOTALL);
+        /** Stack-overflow shape: an alternation/optional/star inside a group that is itself repeated. */
+        private static final Pattern SOE_SHAPE =
+                Pattern.compile(".*\\([^()]*[|?*+][^()]*\\)\\s*[*+{].*", Pattern.DOTALL);
+
+        /** SOE probe: small fixed stack so a deep-recursion pattern overflows regardless of host -Xss. */
+        private static final int SOE_PROBE_STACK_BYTES = 256 * 1024;
+
+        private static final String SOE_PROBE_INPUT = "a".repeat(12000);
+
+        private static final long SOE_PROBE_JOIN_MILLIS = 5000L;
 
         @Override
         @NonNull
@@ -372,10 +419,18 @@ public class NotificationRule extends AbstractDescribableImpl<NotificationRule> 
                         "This pattern back-tracks catastrophically on a synthetic input and would be "
                                 + "aborted at match time (possible ReDoS); consider simplifying it.");
             }
-            // Tier-1 (static hint): shapes commonly associated with pathological backtracking.
+            // SOE probe (authoritative for stack-overflowing shapes): a small fixed-stack thread makes
+            // a deep-recursion pattern overflow deterministically, independent of the host -Xss.
+            if (probeStackOverflow(compiled)) {
+                return FormValidation.warning(
+                        "This pattern overflows the regex engine's stack on a long input and would be "
+                                + "skipped at match time (possible ReDoS); consider simplifying it.");
+            }
+            // Tier-1 (static hint): shapes commonly associated with pathological backtracking or overflow.
             if (BACKREF.matcher(value).matches()
                     || NESTED_QUANTIFIER.matcher(value).matches()
-                    || LARGE_COUNTED.matcher(value).matches()) {
+                    || LARGE_COUNTED.matcher(value).matches()
+                    || SOE_SHAPE.matcher(value).matches()) {
                 return FormValidation.warning(
                         "This pattern contains a shape (nested quantifier, large counted repetition, or "
                                 + "backreference) that can back-track expensively; matching is step-limited "
@@ -383,7 +438,41 @@ public class NotificationRule extends AbstractDescribableImpl<NotificationRule> 
             }
             return FormValidation.ok(
                     "Full-matched against the job full name; include folder separators '/' "
-                            + "explicitly (e.g. 'team/.*').");
+                            + "explicitly (e.g. 'team/.*'). Matching is step-limited at runtime, so a "
+                            + "pathological pattern is skipped rather than hanging the notification thread.");
+        }
+
+        /**
+         * Runs the pattern on a 256KB-stack thread against a long input, catching {@link
+         * StackOverflowError} only (a step-budget abort falls through as "not an overflow"). Returns
+         * {@code true} if it overflowed. A probe that does not finish within the join timeout is
+         * treated as inconclusive ({@code false}) — warn-only, so a slow probe never blocks saving and
+         * the runtime guard remains the backstop.
+         */
+        private static boolean probeStackOverflow(Pattern compiled) {
+            AtomicBoolean overflowed = new AtomicBoolean(false);
+            Thread t = new Thread(
+                    null,
+                    () -> {
+                        try {
+                            compiled.matcher(new BoundedCharSequence(SOE_PROBE_INPUT, MATCH_STEP_BUDGET))
+                                    .matches();
+                        } catch (StackOverflowError e) {
+                            overflowed.set(true);
+                        } catch (MatchBudgetExceededException e) {
+                            // Budget hit first, not a stack overflow → inconclusive for SOE.
+                        }
+                    },
+                    "slack-redos-soe-probe",
+                    SOE_PROBE_STACK_BYTES);
+            t.setDaemon(true);
+            t.start();
+            try {
+                t.join(SOE_PROBE_JOIN_MILLIS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            return overflowed.get();
         }
 
         public ListBoxModel doFillWebhookCredentialIdItems(@QueryParameter String webhookCredentialId) {
