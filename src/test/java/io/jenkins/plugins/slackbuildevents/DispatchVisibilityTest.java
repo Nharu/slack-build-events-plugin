@@ -1,0 +1,159 @@
+package io.jenkins.plugins.slackbuildevents;
+
+import static org.junit.Assert.assertEquals;
+
+import hudson.FilePath;
+import hudson.model.AbstractBuild;
+import hudson.model.Run;
+import hudson.model.TaskListener;
+import java.io.IOException;
+import java.util.List;
+import org.jenkinsci.plugins.tokenmacro.DataBoundTokenMacro;
+import org.junit.Rule;
+import org.junit.Test;
+import org.jvnet.hudson.test.JenkinsRule;
+import org.jvnet.hudson.test.TestExtension;
+
+/**
+ * #15 path-wide visibility: every dispatch-path failure now surfaces a WARNING at the default log
+ * level (was FINE or nothing), routed through the rate-limiting throttle and labeled by category —
+ * while Slack backpressure (429) stays quiet. WARNINGs are captured from the throttle's logger.
+ */
+public class DispatchVisibilityTest {
+
+    @Rule
+    public JenkinsRule j = new JenkinsRule();
+
+    @Test
+    public void credentialMissingLogsWarning() throws Exception {
+        TestWebhookSender sender = new TestWebhookSender();
+        SlackTestHelpers.installSeams(sender);
+        // Default credential id points at a credential that does not exist.
+        SlackTestHelpers.config().setDefaultWebhookCredentialId("ghost");
+        SlackTestHelpers.config().setRules(List.of(SlackTestHelpers.rule("myjob", List.of("success"))));
+
+        try (LogCapture logs = new LogCapture(FailureLogThrottle.class)) {
+            j.buildAndAssertSuccess(j.createFreeStyleProject("myjob"));
+            SlackTestHelpers.awaitDispatch();
+            assertEquals(1, logs.warningsContaining("CREDENTIAL_MISSING"));
+            // Nothing was sent.
+            assertEquals(0, sender.calls.get());
+        }
+    }
+
+    @Test
+    public void httpClientErrorLogsWarning() throws Exception {
+        TestWebhookSender sender = new TestWebhookSender();
+        sender.script(TestWebhookSender.status(404));
+        installWithCredential(sender);
+
+        try (LogCapture logs = new LogCapture(FailureLogThrottle.class)) {
+            fireSuccessNotification();
+            assertEquals(1, logs.warningsContaining("HTTP_CLIENT_ERROR"));
+            assertEquals(1, logs.warningsContaining("HTTP 404"));
+        }
+    }
+
+    @Test
+    public void httpServerErrorLogsWarning() throws Exception {
+        TestWebhookSender sender = new TestWebhookSender();
+        sender.script(TestWebhookSender.status(500));
+        installWithCredential(sender);
+
+        try (LogCapture logs = new LogCapture(FailureLogThrottle.class)) {
+            fireSuccessNotification();
+            assertEquals(1, logs.warningsContaining("HTTP_SERVER_ERROR"));
+        }
+    }
+
+    @Test
+    public void transportErrorLogsWarning() throws Exception {
+        WebhookSender throwing = new WebhookSender() {
+            @Override
+            Response send(String url, String jsonBody) throws IOException {
+                throw new IOException("connection reset");
+            }
+        };
+        installWithCredential(throwing);
+
+        try (LogCapture logs = new LogCapture(FailureLogThrottle.class)) {
+            fireSuccessNotification();
+            assertEquals(1, logs.warningsContaining("TRANSPORT_ERROR"));
+        }
+    }
+
+    @Test
+    public void rateLimit429IsQuiet() throws Exception {
+        TestWebhookSender sender = new TestWebhookSender();
+        sender.script(TestWebhookSender.status429RetryNow());
+        installWithCredential(sender);
+        SlackTestHelpers.config().setMaxRetriesOn429(0); // no retry budget → terminal 429
+
+        try (LogCapture logs = new LogCapture(FailureLogThrottle.class)) {
+            fireSuccessNotification();
+            // 429 is normal backpressure: no WARNING at all.
+            assertEquals(0, logs.warningCount());
+        }
+    }
+
+    @Test
+    public void renderDegradedLogsWarning() throws Exception {
+        TestWebhookSender sender = new TestWebhookSender();
+        installWithCredential(sender);
+        NotificationRule rule = SlackTestHelpers.rule("myjob", List.of("success"));
+        rule.setSuccessTemplate("bad=${DEFINITELY_UNKNOWN}");
+        SlackTestHelpers.config().setRules(List.of(rule));
+
+        try (LogCapture logs = new LogCapture(FailureLogThrottle.class)) {
+            j.buildAndAssertSuccess(j.createFreeStyleProject("myjob"));
+            SlackTestHelpers.awaitDispatch();
+            assertEquals(1, logs.warningsContaining("RENDER_DEGRADED"));
+        }
+    }
+
+    @Test
+    public void renderFallbackLogsWarning() throws Exception {
+        TestWebhookSender sender = new TestWebhookSender();
+        installWithCredential(sender);
+        NotificationRule rule = SlackTestHelpers.rule("myjob", List.of("success"));
+        rule.setSuccessTemplate("boom=${SLACK_TEST_RUNTIME}");
+        SlackTestHelpers.config().setRules(List.of(rule));
+
+        try (LogCapture logs = new LogCapture(FailureLogThrottle.class)) {
+            j.buildAndAssertSuccess(j.createFreeStyleProject("myjob"));
+            SlackTestHelpers.awaitDispatch();
+            assertEquals(1, logs.warningsContaining("RENDER_FALLBACK"));
+        }
+    }
+
+    private void installWithCredential(WebhookSender sender) throws Exception {
+        SlackTestHelpers.installSeams(sender);
+        SlackTestHelpers.addWebhookCredential("wh", "http://example.test/hook");
+        SlackTestHelpers.config().setDefaultWebhookCredentialId("wh");
+    }
+
+    private void fireSuccessNotification() throws Exception {
+        SlackTestHelpers.config().setRules(List.of(SlackTestHelpers.rule("myjob", List.of("success"))));
+        j.buildAndAssertSuccess(j.createFreeStyleProject("myjob"));
+        SlackTestHelpers.awaitDispatch();
+    }
+
+    /** Registered macro that throws a plain {@link RuntimeException} → both passes throw → FALLBACK. */
+    @TestExtension
+    public static class RuntimeFailingMacro extends DataBoundTokenMacro {
+        @Override
+        public boolean acceptsMacroName(String name) {
+            return "SLACK_TEST_RUNTIME".equals(name);
+        }
+
+        @Override
+        public String evaluate(AbstractBuild<?, ?> context, TaskListener listener, String macroName) {
+            throw new RuntimeException("runtime boom");
+        }
+
+        @Override
+        public String evaluate(Run<?, ?> run, FilePath workspace, TaskListener listener, String macroName) {
+            throw new RuntimeException("runtime boom");
+        }
+    }
+}

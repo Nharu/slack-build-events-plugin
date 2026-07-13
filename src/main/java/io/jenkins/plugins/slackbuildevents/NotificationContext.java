@@ -31,6 +31,9 @@ final class NotificationContext {
     /** Start-time branch snapshot, captured on the event thread; {@code null} for completion events. */
     @CheckForNull
     private final String branchHint;
+    /** The event that triggered this notification; carried for failure-signal WARNING message bodies. */
+    @NonNull
+    private final EventType event;
 
     NotificationContext(
             @NonNull Run<?, ?> run,
@@ -39,7 +42,8 @@ final class NotificationContext {
             @NonNull String webhookCredentialId,
             @NonNull String template,
             @NonNull String color,
-            @CheckForNull String branchHint) {
+            @CheckForNull String branchHint,
+            @NonNull EventType event) {
         this.run = run;
         this.listener = listener;
         this.channel = channel;
@@ -47,6 +51,7 @@ final class NotificationContext {
         this.template = template;
         this.color = color;
         this.branchHint = branchHint;
+        this.event = event;
     }
 
     @NonNull
@@ -82,5 +87,10 @@ final class NotificationContext {
     @CheckForNull
     String branchHint() {
         return branchHint;
+    }
+
+    @NonNull
+    EventType event() {
+        return event;
     }
 }

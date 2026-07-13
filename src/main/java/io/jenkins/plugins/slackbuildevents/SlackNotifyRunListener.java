@@ -91,7 +91,7 @@ public class SlackNotifyRunListener extends RunListener<Run<?, ?>> {
             String branchHint =
                     (event == EventType.START) ? GitMacroSupport.captureStartBranch(run, listener) : null;
             NotificationContext context = new NotificationContext(
-                    run, listener, channel, webhookCredentialId, template, color, branchHint);
+                    run, listener, channel, webhookCredentialId, template, color, branchHint, event);
             NotificationDispatcher.get().dispatch(context);
         } catch (RuntimeException e) {
             // Belt-and-suspenders: a listener must never break a build.
