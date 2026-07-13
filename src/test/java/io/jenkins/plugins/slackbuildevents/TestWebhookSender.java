@@ -24,6 +24,8 @@ class TestWebhookSender extends WebhookSender {
     private final Queue<Response> scripted = new ConcurrentLinkedQueue<>();
     private volatile int defaultStatus = 200;
     private volatile CountDownLatch gate;
+    private volatile CountDownLatch entered; // counted down when send enters (just before it blocks)
+    private volatile CountDownLatch completed; // counted down when send fully returns (after release)
 
     /** Queues responses returned (in order) by successive {@link #send} calls. */
     void script(Response... responses) {
@@ -48,16 +50,35 @@ class TestWebhookSender extends WebhookSender {
         this.gate = gate;
     }
 
+    /** Signals that send has entered (and is about to block): proves the work is in-flight. */
+    void signalEntryOn(CountDownLatch entered) {
+        this.entered = entered;
+    }
+
+    /** Signals that send has fully finished (after the block is released). */
+    void signalCompletionOn(CountDownLatch completed) {
+        this.completed = completed;
+    }
+
     @Override
     Response send(String url, String jsonBody) throws IOException, InterruptedException {
         calls.incrementAndGet();
         urls.add(url);
         bodies.add(jsonBody);
+        CountDownLatch e = entered;
+        if (e != null) {
+            e.countDown();
+        }
         CountDownLatch g = gate;
         if (g != null) {
             g.await();
         }
         Response next = scripted.poll();
-        return next != null ? next : new Response(defaultStatus, null);
+        Response response = next != null ? next : new Response(defaultStatus, null);
+        CountDownLatch c = completed;
+        if (c != null) {
+            c.countDown();
+        }
+        return response;
     }
 }
