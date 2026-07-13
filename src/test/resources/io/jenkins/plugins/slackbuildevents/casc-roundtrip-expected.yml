@@ -1,0 +1,42 @@
+defaultAbortedTemplate: "global-aborted-tmpl"
+defaultChannel: "#builds"
+defaultColor: "#36a64f"
+defaultFailureTemplate: "global-failure-tmpl"
+defaultNotBuiltTemplate: "global-notbuilt-tmpl"
+defaultStartTemplate: "global-start-tmpl"
+defaultSuccessTemplate: "global-success-tmpl"
+defaultUnstableTemplate: "global-unstable-tmpl"
+defaultWebhookCredentialId: "slack-default-cred"
+httpsOnly: true
+maxRetriesOn429: 4
+rules:
+- abortedTemplate: "z-aborted"
+  channel: "#zeta-alerts"
+  failureTemplate: "z-failure"
+  jobNamePattern: "zeta/deploy-.*"
+  notBuiltTemplate: "z-notbuilt"
+  notifyAborted: true
+  notifyFailure: true
+  notifyNotBuilt: true
+  notifyStart: true
+  notifySuccess: true
+  notifyUnstable: true
+  startTemplate: "z-start"
+  successTemplate: "z-success"
+  unstableTemplate: "z-unstable"
+  webhookCredentialId: "slack-zeta-cred"
+- abortedTemplate: "a-aborted"
+  channel: "#alpha-ci"
+  failureTemplate: "a-failure"
+  jobNamePattern: "alpha/build-.*"
+  notBuiltTemplate: "a-notbuilt"
+  notifyAborted: true
+  notifyFailure: true
+  notifySuccess: true
+  startTemplate: "a-start"
+  successTemplate: "a-success"
+  unstableTemplate: "a-unstable"
+  webhookCredentialId: "slack-alpha-cred"
+webhookHostAllowlist:
+- "HOOKS.slack.com"
+- "mattermost.internal"
