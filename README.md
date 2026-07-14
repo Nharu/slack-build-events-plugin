@@ -107,6 +107,16 @@ pod/ephemeral agents where the workspace is gone by completion time.
 > directly into a custom template bypasses that escaping — use the provided `SLACK_*` macros
 > for SCM-derived values rather than raw env references.
 
+> **Breaking change — plain `${VAR}` / `$VAR` in custom templates.** Templates are now expanded
+> with recognized token macros only; the previous leading plain-environment substitution pass is
+> gone. A custom template that referenced a bare `${VAR}` / `$VAR` whose name is **not** a
+> recognized macro (e.g. a build parameter or arbitrary env var) no longer expands — that whole
+> message is sent as raw, unexpanded text. Names owned by a macro still expand normally
+> (`${SLACK_*}`, and third-party macros such as git's `${GIT_BRANCH}`). To migrate, replace bare
+> env references with a `${SLACK_*}` macro or the explicit `${ENV,var="..."}` form. On startup the
+> plugin logs a one-time `WARNING` naming any configured templates affected by this change, and the
+> global/rule template fields show a non-blocking hint while you edit them.
+
 ## Versioning
 
 Internal pinned releases use a strictly monotonic `0.x` line (`0.1.0 → 0.2.0 → …`;

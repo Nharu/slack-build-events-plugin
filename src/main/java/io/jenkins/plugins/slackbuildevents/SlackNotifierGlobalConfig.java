@@ -225,6 +225,46 @@ public final class SlackNotifierGlobalConfig extends GlobalConfiguration {
         return FormValidation.ok();
     }
 
+    // Non-blocking save-time lint for each default template field: nudges admins away from raw,
+    // unescaped ${ENV,var="..."} value references and flags plain ${VAR}/$VAR that no longer expands.
+    // ADMINISTER-gated (like every doCheck here) so the endpoint is not an information oracle.
+
+    @POST
+    public FormValidation doCheckDefaultStartTemplate(@QueryParameter String value) {
+        Jenkins.get().checkPermission(Jenkins.ADMINISTER);
+        return TemplateLint.check(value);
+    }
+
+    @POST
+    public FormValidation doCheckDefaultSuccessTemplate(@QueryParameter String value) {
+        Jenkins.get().checkPermission(Jenkins.ADMINISTER);
+        return TemplateLint.check(value);
+    }
+
+    @POST
+    public FormValidation doCheckDefaultFailureTemplate(@QueryParameter String value) {
+        Jenkins.get().checkPermission(Jenkins.ADMINISTER);
+        return TemplateLint.check(value);
+    }
+
+    @POST
+    public FormValidation doCheckDefaultUnstableTemplate(@QueryParameter String value) {
+        Jenkins.get().checkPermission(Jenkins.ADMINISTER);
+        return TemplateLint.check(value);
+    }
+
+    @POST
+    public FormValidation doCheckDefaultAbortedTemplate(@QueryParameter String value) {
+        Jenkins.get().checkPermission(Jenkins.ADMINISTER);
+        return TemplateLint.check(value);
+    }
+
+    @POST
+    public FormValidation doCheckDefaultNotBuiltTemplate(@QueryParameter String value) {
+        Jenkins.get().checkPermission(Jenkins.ADMINISTER);
+        return TemplateLint.check(value);
+    }
+
     public ListBoxModel doFillDefaultWebhookCredentialIdItems(
             @QueryParameter String defaultWebhookCredentialId) {
         return WebhookCredentials.fillItems(defaultWebhookCredentialId);

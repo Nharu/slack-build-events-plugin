@@ -273,6 +273,45 @@ public class NotificationRule extends AbstractDescribableImpl<NotificationRule> 
                             + "explicitly (e.g. 'team/.*').");
         }
 
+        // Non-blocking save-time lint for each per-rule template override, mirroring the global-config
+        // template fields: same shared TemplateLint.check, same ADMINISTER gate.
+
+        @POST
+        public FormValidation doCheckStartTemplate(@QueryParameter String value) {
+            Jenkins.get().checkPermission(Jenkins.ADMINISTER);
+            return TemplateLint.check(value);
+        }
+
+        @POST
+        public FormValidation doCheckSuccessTemplate(@QueryParameter String value) {
+            Jenkins.get().checkPermission(Jenkins.ADMINISTER);
+            return TemplateLint.check(value);
+        }
+
+        @POST
+        public FormValidation doCheckFailureTemplate(@QueryParameter String value) {
+            Jenkins.get().checkPermission(Jenkins.ADMINISTER);
+            return TemplateLint.check(value);
+        }
+
+        @POST
+        public FormValidation doCheckUnstableTemplate(@QueryParameter String value) {
+            Jenkins.get().checkPermission(Jenkins.ADMINISTER);
+            return TemplateLint.check(value);
+        }
+
+        @POST
+        public FormValidation doCheckAbortedTemplate(@QueryParameter String value) {
+            Jenkins.get().checkPermission(Jenkins.ADMINISTER);
+            return TemplateLint.check(value);
+        }
+
+        @POST
+        public FormValidation doCheckNotBuiltTemplate(@QueryParameter String value) {
+            Jenkins.get().checkPermission(Jenkins.ADMINISTER);
+            return TemplateLint.check(value);
+        }
+
         public ListBoxModel doFillWebhookCredentialIdItems(@QueryParameter String webhookCredentialId) {
             return WebhookCredentials.fillItems(webhookCredentialId);
         }

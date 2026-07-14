@@ -70,6 +70,8 @@ public class NotificationDispatcher {
     private final AtomicInteger pendingRetries = new AtomicInteger();
     private final AtomicLong droppedCount = new AtomicLong();
     private final Set<CompletableFuture<Void>> inFlight = ConcurrentHashMap.newKeySet();
+    /** Template hashes already warned about on raw fallback, so the WARNING fires once per template. */
+    private final Set<Integer> loggedFallbackTemplateHashes = ConcurrentHashMap.newKeySet();
 
     @NonNull
     static NotificationDispatcher get() {
@@ -95,6 +97,7 @@ public class NotificationDispatcher {
             this.pendingRetries.set(0);
             this.droppedCount.set(0);
             this.inFlight.clear();
+            this.loggedFallbackTemplateHashes.clear();
         }
     }
 
@@ -240,11 +243,24 @@ public class NotificationDispatcher {
         // Install the start-time branch snapshot for the duration of this render only.
         GitMacroSupport.setStartBranchHint(context.branchHint());
         try {
-            // Single pass: substituted values are not re-scanned, so user-controlled env
-            // cannot inject further macros.
-            return TokenMacro.expandAll(context.run(), null, context.listener(), context.template());
+            // Macro-only expansion: expand() evaluates registered macros in a single pass and does NOT
+            // run token-macro's leading plain-env substitution pass (that is expandAll's behavior). So a
+            // user-controlled env value is never spliced into the template ahead of macro evaluation, and
+            // an unrecognized ${VAR}/$VAR raises MacroEvaluationException instead of being substituted
+            // raw — caught below and handled as a whole-template raw fallback.
+            return TokenMacro.expand(context.run(), null, context.listener(), context.template());
         } catch (Exception e) {
-            LOGGER.log(Level.FINE, "Template expansion failed; sending raw template", e);
+            // A custom template referencing an unregistered ${VAR}/$VAR lands here: the whole message
+            // falls back to raw text. Warn once per distinct template so an unattended pipeline can
+            // observe it, without flooding the log on every build.
+            if (loggedFallbackTemplateHashes.add(context.template().hashCode())) {
+                LOGGER.log(
+                        Level.WARNING,
+                        "Slack template expansion failed; sending the template unexpanded (raw). A "
+                                + "${VAR}/$VAR reference that is not a recognized macro stops expansion; "
+                                + "use a ${SLACK_*} macro or ${ENV,var=\"...\"} instead.",
+                        e);
+            }
             return context.template();
         } finally {
             // Clear on EVERY exit path (including the raw-template fallback above) so the hint never
