@@ -8,7 +8,6 @@ import hudson.model.AbstractDescribableImpl;
 import hudson.model.Descriptor;
 import hudson.util.FormValidation;
 import hudson.util.ListBoxModel;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.regex.Pattern;
@@ -35,12 +34,17 @@ public class NotificationRule extends AbstractDescribableImpl<NotificationRule> 
     private static final long MATCH_STEP_BUDGET = 1_000_000L;
 
     /**
-     * Upper bound on the job full name length fed to the matcher. A pathological pattern whose engine
-     * recursion overflows the stack (e.g. {@code (a|a)*}) can throw {@link StackOverflowError} after
-     * only a few thousand reads — below the step budget — so a length guard deterministically prevents
-     * reaching that depth. Well above any legitimate (deep folder) job name.
+     * Upper bound on the job full name length fed to the matcher. This is defense-in-depth only: it
+     * caps worst-case matching latency and lowers the odds of reaching stack-overflow recursion depth
+     * on a typical host, but it does NOT deterministically prevent overflow — a pattern can overflow
+     * below this limit on a small {@code -Xss}. The deterministic fail-closed backstop is the
+     * {@link StackOverflowError} catch in {@link #matches(String, long)}, which holds regardless of
+     * stack size. Well above any legitimate (deep folder) job name.
      */
     private static final int MAX_MATCH_INPUT_LENGTH = 1024;
+
+    /** Max chars of a job full name included in a length-guard WARNING (bounded to cap log size). */
+    private static final int MAX_LOGGED_PREFIX_LENGTH = 128;
 
     private final String jobNamePattern;
     private String channel;
@@ -62,10 +66,13 @@ public class NotificationRule extends AbstractDescribableImpl<NotificationRule> 
 
     private transient Pattern compiled;
     private transient boolean compileAttempted;
-    // Shared dedup flag for all three match-guard WARNING paths (step budget, stack overflow, input
-    // length): one WARNING per rule. Plain (non-atomic) transient: reset to false on XStream
-    // deserialization, so no path can NPE the way a null AtomicBoolean reference would; a benign
-    // duplicate log under a race is accepted. Mirrors the compileAttempted transient convention above.
+    // Per-log-site dedup flags (one WARNING per rule per site), so a warning from one site never
+    // silences a different failure mode on the same rule. matchLengthGuardWarned covers the input
+    // length pre-guard; matchGuardWarned covers the matcher catch site (step budget or stack overflow,
+    // which share one log site and are told apart by the message). Plain (non-atomic) transient: reset
+    // to false on XStream deserialization, so no path can NPE the way a null AtomicBoolean reference
+    // would; a benign duplicate log under a race is accepted. Mirrors the compileAttempted convention.
+    private transient boolean matchLengthGuardWarned;
     private transient boolean matchGuardWarned;
 
     @DataBoundConstructor
@@ -221,13 +228,15 @@ public class NotificationRule extends AbstractDescribableImpl<NotificationRule> 
 
     /** Test seam: {@link #matches(String)} with an explicit step budget. */
     boolean matches(@NonNull String jobFullName, long stepBudget) {
-        // Input length guard (before the matcher): deterministically prevents a stack-overflowing
-        // pattern from reaching engine-recursion depth, which can precede the step budget. Log the
-        // length and a bounded prefix only — never the full name — so a legitimately long (deep
-        // folder) job that keeps hitting this guard is still identifiable without log amplification.
+        // Input length guard (before the matcher): defense-in-depth that caps worst-case latency and
+        // lowers the odds of reaching stack-overflow depth on a typical host — NOT a deterministic
+        // overflow preventer (a small -Xss can overflow below this limit); the deterministic backstop
+        // is the StackOverflowError catch below. Log the length and a bounded prefix only — never the
+        // full name — so a legitimately long (deep folder) job that keeps hitting this guard stays
+        // identifiable without log amplification.
         if (jobFullName.length() > MAX_MATCH_INPUT_LENGTH) {
-            if (!matchGuardWarned) {
-                matchGuardWarned = true;
+            if (!matchLengthGuardWarned) {
+                matchLengthGuardWarned = true;
                 LOGGER.log(
                         Level.WARNING,
                         "Slack notification rule skipped: job full name length {0} exceeds the match input "
@@ -264,7 +273,7 @@ public class NotificationRule extends AbstractDescribableImpl<NotificationRule> 
     /** Bounded, safe-to-log prefix of a job full name (never the whole name). */
     @NonNull
     private static String prefix(@NonNull String jobFullName) {
-        return jobFullName.substring(0, Math.min(128, jobFullName.length()));
+        return jobFullName.substring(0, Math.min(MAX_LOGGED_PREFIX_LENGTH, jobFullName.length()));
     }
 
     private synchronized Pattern pattern() {
@@ -385,12 +394,9 @@ public class NotificationRule extends AbstractDescribableImpl<NotificationRule> 
         private static final Pattern SOE_SHAPE =
                 Pattern.compile(".*\\([^()]*[|?*+][^()]*\\)\\s*[*+{].*", Pattern.DOTALL);
 
-        /** SOE probe: small fixed stack so a deep-recursion pattern overflows regardless of host -Xss. */
-        private static final int SOE_PROBE_STACK_BYTES = 256 * 1024;
-
-        private static final String SOE_PROBE_INPUT = "a".repeat(12000);
-
-        private static final long SOE_PROBE_JOIN_MILLIS = 5000L;
+        /** Stack-overflow shape: a group whose body is itself a quantified/alternated group, repeated. */
+        private static final Pattern NESTED_GROUP_REPEAT =
+                Pattern.compile(".*\\([^()]*\\([^()]*[|?*+][^()]*\\)[^()]*\\)\\s*[*+{].*", Pattern.DOTALL);
 
         @Override
         @NonNull
@@ -419,18 +425,12 @@ public class NotificationRule extends AbstractDescribableImpl<NotificationRule> 
                         "This pattern back-tracks catastrophically on a synthetic input and would be "
                                 + "aborted at match time (possible ReDoS); consider simplifying it.");
             }
-            // SOE probe (authoritative for stack-overflowing shapes): a small fixed-stack thread makes
-            // a deep-recursion pattern overflow deterministically, independent of the host -Xss.
-            if (probeStackOverflow(compiled)) {
-                return FormValidation.warning(
-                        "This pattern overflows the regex engine's stack on a long input and would be "
-                                + "skipped at match time (possible ReDoS); consider simplifying it.");
-            }
             // Tier-1 (static hint): shapes commonly associated with pathological backtracking or overflow.
             if (BACKREF.matcher(value).matches()
                     || NESTED_QUANTIFIER.matcher(value).matches()
                     || LARGE_COUNTED.matcher(value).matches()
-                    || SOE_SHAPE.matcher(value).matches()) {
+                    || SOE_SHAPE.matcher(value).matches()
+                    || NESTED_GROUP_REPEAT.matcher(value).matches()) {
                 return FormValidation.warning(
                         "This pattern contains a shape (nested quantifier, large counted repetition, or "
                                 + "backreference) that can back-track expensively; matching is step-limited "
@@ -440,39 +440,6 @@ public class NotificationRule extends AbstractDescribableImpl<NotificationRule> 
                     "Full-matched against the job full name; include folder separators '/' "
                             + "explicitly (e.g. 'team/.*'). Matching is step-limited at runtime, so a "
                             + "pathological pattern is skipped rather than hanging the notification thread.");
-        }
-
-        /**
-         * Runs the pattern on a 256KB-stack thread against a long input, catching {@link
-         * StackOverflowError} only (a step-budget abort falls through as "not an overflow"). Returns
-         * {@code true} if it overflowed. A probe that does not finish within the join timeout is
-         * treated as inconclusive ({@code false}) — warn-only, so a slow probe never blocks saving and
-         * the runtime guard remains the backstop.
-         */
-        private static boolean probeStackOverflow(Pattern compiled) {
-            AtomicBoolean overflowed = new AtomicBoolean(false);
-            Thread t = new Thread(
-                    null,
-                    () -> {
-                        try {
-                            compiled.matcher(new BoundedCharSequence(SOE_PROBE_INPUT, MATCH_STEP_BUDGET))
-                                    .matches();
-                        } catch (StackOverflowError e) {
-                            overflowed.set(true);
-                        } catch (MatchBudgetExceededException e) {
-                            // Budget hit first, not a stack overflow → inconclusive for SOE.
-                        }
-                    },
-                    "slack-redos-soe-probe",
-                    SOE_PROBE_STACK_BYTES);
-            t.setDaemon(true);
-            t.start();
-            try {
-                t.join(SOE_PROBE_JOIN_MILLIS);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
-            return overflowed.get();
         }
 
         public ListBoxModel doFillWebhookCredentialIdItems(@QueryParameter String webhookCredentialId) {

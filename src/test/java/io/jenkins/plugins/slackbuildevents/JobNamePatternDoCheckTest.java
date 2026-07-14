@@ -58,15 +58,16 @@ public class JobNamePatternDoCheckTest {
 
     @Test
     public void soeShapePatternsWarn() {
-        // alternation/optional-under-star: flagged by the SOE_SHAPE static hint and the 256KB probe.
+        // alternation/optional-under-star: flagged by the SOE_SHAPE static hint.
         assertEquals(FormValidation.Kind.WARNING, descriptor.doCheckJobNamePattern("(a|a)*").kind);
         assertEquals(FormValidation.Kind.WARNING, descriptor.doCheckJobNamePattern("(a?)*").kind);
         assertEquals(FormValidation.Kind.WARNING, descriptor.doCheckJobNamePattern("(a|aa)+").kind);
     }
 
     @Test
-    public void nestedParenOverflowIsCaughtByProbe() {
-        // SOE_SHAPE misses nested parens, but the probe overflows → WARNING (probe/static complement).
+    public void nestedParenOverflowPatternWarns() {
+        // SOE_SHAPE misses nested parens, but NESTED_GROUP_REPEAT statically matches it → WARNING.
+        // Deterministic (pure string match), unlike the removed host-stack-dependent runtime probe.
         assertEquals(FormValidation.Kind.WARNING, descriptor.doCheckJobNamePattern("((a|a))*").kind);
     }
 

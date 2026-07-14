@@ -94,8 +94,32 @@ public class RuleMatchingTimeoutTest {
 
         assertEquals(1, logging.getRecords().size());
         String rendered = render(logging.getRecords().get(0));
+        // Path isolation: the skip came from the length guard, not the step-budget / stack-overflow catch.
+        assertTrue("skip is from the length guard", rendered.contains("exceeds the match input limit"));
+        assertFalse("not the step-budget path", rendered.contains("match step budget"));
+        assertFalse("not the stack-overflow path", rendered.contains("overflowed the stack"));
         assertTrue("full length is reported", rendered.contains("2005"));
         assertFalse("the full job name must never be logged", rendered.contains(longName));
+    }
+
+    @Test
+    public void lengthGuardAndCatchSiteDedupIndependently() {
+        logging.record(NotificationRule.class, Level.WARNING).capture(10);
+        NotificationRule rule = new NotificationRule(".*a");
+
+        rule.matches("a".repeat(2000)); // length guard fires (input > MAX_MATCH_INPUT_LENGTH)
+        rule.matches("aaaaaaaaaa", 3L); // same rule: short input, tiny budget → matcher catch site fires
+
+        // Two distinct failure modes on one rule: the length-guard warning must not silence the
+        // catch-site warning (separate per-site dedup flags).
+        long lengthWarnings = logging.getRecords().stream()
+                .filter(r -> render(r).contains("exceeds the match input limit"))
+                .count();
+        long catchWarnings = logging.getRecords().stream()
+                .filter(r -> render(r).contains("match step budget"))
+                .count();
+        assertEquals(1, lengthWarnings);
+        assertEquals(1, catchWarnings);
     }
 
     @Test
