@@ -11,6 +11,10 @@ import java.util.logging.Logger;
  * Captures {@link LogRecord}s from a named logger for the life of a try-with-resources block, so a
  * test can assert on the WARNING signals emitted by the dispatch path (the whole point of #15 is that
  * these become visible at the default level).
+ *
+ * <p>The handler is attached to a process-global {@link Logger}, which is safe only because this suite
+ * runs sequentially (the POM configures no test parallelism or forking). Enabling parallel tests would
+ * require per-test isolation here.
  */
 final class LogCapture implements AutoCloseable {
 

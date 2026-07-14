@@ -12,6 +12,9 @@ import org.jenkinsci.plugins.tokenmacro.MacroEvaluationException;
  */
 final class RenderFailureEvent {
 
+    /** Cap on cause-chain traversal, shared by {@link #unwrap} and the dispatcher's interrupt-cause scan. */
+    static final int MAX_CAUSE_CHAIN_DEPTH = 16;
+
     /** {@code DEGRADED} or {@code FALLBACK} — retains the render severity distinction. */
     @NonNull
     final RenderCategory category;
@@ -26,6 +29,9 @@ final class RenderFailureEvent {
 
     @NonNull
     final String jobFullName;
+
+    /** Build number of the run, captured so the WARNING body reads one consistent provenance. */
+    final int buildNumber;
 
     /** The event that triggered the notification; WARNING-body context only, never in the signature. */
     @NonNull
@@ -47,6 +53,7 @@ final class RenderFailureEvent {
             @NonNull Throwable cause,
             @NonNull Throwable rootCause,
             @NonNull String jobFullName,
+            int buildNumber,
             @NonNull EventType event,
             @NonNull String webhookCredentialId,
             @NonNull String template,
@@ -55,6 +62,7 @@ final class RenderFailureEvent {
         this.cause = cause;
         this.rootCause = rootCause;
         this.jobFullName = jobFullName;
+        this.buildNumber = buildNumber;
         this.event = event;
         this.webhookCredentialId = webhookCredentialId;
         this.template = template;
@@ -74,7 +82,7 @@ final class RenderFailureEvent {
         while (current instanceof MacroEvaluationException
                 && current.getCause() != null
                 && current.getCause() != current
-                && guard++ < 16) {
+                && guard++ < MAX_CAUSE_CHAIN_DEPTH) {
             current = current.getCause();
         }
         return current;

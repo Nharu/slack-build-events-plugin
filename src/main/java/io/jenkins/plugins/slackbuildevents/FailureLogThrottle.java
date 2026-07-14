@@ -19,10 +19,13 @@ import java.util.logging.Logger;
  * {@code clock} seam) — this class never reads a wall clock, keeping tests deterministic.
  *
  * <p>All per-signature state transitions happen inside a {@link ConcurrentHashMap#compute}
- * bin lock; the actual {@link Logger} emission is done off-lock. Memory is bounded to
- * {@link #MAX_TRACKED_SIGNATURES}: an over-cap insert first sweeps expired windows, and if
- * still saturated fails open (visibility wins) but coarse-rate-limits its own saturation
- * notice to one line per window so fail-open cannot itself become unbounded.
+ * bin lock; the actual {@link Logger} emission is done off-lock. Memory is approximately bounded by
+ * {@link #MAX_TRACKED_SIGNATURES} — a soft limit: the size check and the insert are not one atomic step,
+ * so a few concurrent dispatch-pool callers can overshoot it by up to the pool width before the next
+ * sweep reclaims the excess. An over-cap insert first sweeps expired windows; if still saturated it
+ * fails open, meaning over-cap <em>new</em> signatures are dropped (not logged individually) until
+ * capacity frees up, while already-tracked signatures keep logging normally. That drop is itself
+ * announced by a single coarse-rate-limited saturation notice per window, so it never becomes unbounded.
  */
 final class FailureLogThrottle {
 
@@ -53,9 +56,10 @@ final class FailureLogThrottle {
      * Records one failure under {@code signature}. Emits a WARNING (built lazily from
      * {@code messageSupplier}) only when this is the first occurrence in a fresh window;
      * otherwise counts it as suppressed. When a window rolls, the first log of the new
-     * window piggybacks the previous window's suppressed count so no tail is lost.
+     * window piggybacks the previous window's suppressed count onto the headline so the
+     * volume signal stays on line 1, above any multi-line detail.
      */
-    void recordFailure(@NonNull String signature, long now, @NonNull Supplier<String> messageSupplier) {
+    void recordFailure(@NonNull String signature, long now, @NonNull Supplier<FailureMessage> messageSupplier) {
         if (!windows.containsKey(signature) && windows.size() >= MAX_TRACKED_SIGNATURES) {
             // At cap for a new signature: try to reclaim expired windows first.
             sweepExpired(now);
@@ -86,12 +90,25 @@ final class FailureLogThrottle {
 
         if (piggyback[0] >= 0L) {
             long suppressed = piggyback[0];
-            String message = messageSupplier.get();
+            FailureMessage message;
+            try {
+                message = messageSupplier.get();
+            } catch (RuntimeException supplierFailure) {
+                // The message builder threw — e.g. a throwable's getMessage()/stack trace, or a live model
+                // dereference during teardown. This branch registered the window BEFORE building the
+                // message, so letting it propagate would drop the failure with no log AND blackhole the
+                // signature for the rest of the window. Emit a visible stand-in instead, keeping the window
+                // intact, and never propagate out of recordFailure.
+                message = new FailureMessage("Slack notification failure signal — its message could not be built ("
+                        + supplierFailure.getClass().getName() + ")");
+            }
+            String headline = message.headline;
             if (suppressed > 0L) {
-                message = message + " [" + suppressed + " similar failure(s) suppressed in the previous "
+                headline = headline + " [" + suppressed + " similar failure(s) suppressed in the previous "
                         + (WINDOW_MS / 60_000L) + "-minute window]";
             }
-            LOGGER.log(Level.WARNING, message);
+            String full = message.detail != null ? headline + "\n" + message.detail : headline;
+            LOGGER.log(Level.WARNING, full);
         }
     }
 
@@ -126,8 +143,8 @@ final class FailureLogThrottle {
         if (elapsed && saturationWindowStart.compareAndSet(current, now)) {
             LOGGER.log(
                     Level.WARNING,
-                    "Slack notification failure-log throttle saturated, " + windows.size()
-                            + " signatures tracked, suppression disabled");
+                    "Slack notification failure-log throttle saturated at " + windows.size()
+                            + " tracked signatures; new failure signatures are dropped until capacity frees up");
         }
     }
 

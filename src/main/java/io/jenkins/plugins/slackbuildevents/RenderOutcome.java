@@ -7,7 +7,12 @@ import edu.umd.cs.findbugs.annotations.NonNull;
  * Result of {@link NotificationDispatcher#render}: a category plus the body to send. The category
  * always distinguishes send ({@code CLEAN}/{@code DEGRADED}/{@code FALLBACK}) from skip
  * ({@code ABORTED}), and {@link #event()} carries the failure-signal payload for the two failure
- * categories. The body is never the raw template.
+ * categories.
+ *
+ * <p>Expansion is not all-or-nothing: every resolvable token is always resolved, and only the tokens
+ * that failed survive as literals. A template consisting of a single unresolved token can therefore
+ * produce a DEGRADED body that coincides with the template text — but no resolvable token is ever
+ * dropped, and every DEGRADED/FALLBACK render emits a WARNING.
  */
 final class RenderOutcome {
 

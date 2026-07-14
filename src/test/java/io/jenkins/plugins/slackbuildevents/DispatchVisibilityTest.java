@@ -4,10 +4,20 @@ import static org.junit.Assert.assertEquals;
 
 import hudson.FilePath;
 import hudson.model.AbstractBuild;
+import hudson.model.FreeStyleBuild;
 import hudson.model.Run;
 import hudson.model.TaskListener;
 import java.io.IOException;
+import java.util.EnumSet;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.jenkinsci.plugins.tokenmacro.DataBoundTokenMacro;
 import org.junit.Rule;
 import org.junit.Test;
@@ -124,6 +134,96 @@ public class DispatchVisibilityTest {
             SlackTestHelpers.awaitDispatch();
             assertEquals(1, logs.warningsContaining("RENDER_FALLBACK"));
         }
+    }
+
+    @Test
+    public void unexpectedErrorLogsWarning() throws Exception {
+        WebhookSender throwing = new WebhookSender() {
+            @Override
+            Response send(String url, String jsonBody) {
+                throw new IllegalStateException("unexpected boom");
+            }
+        };
+        installWithCredential(throwing);
+
+        try (LogCapture logs = new LogCapture(FailureLogThrottle.class)) {
+            fireSuccessNotification();
+            assertEquals(1, logs.warningsContaining("UNEXPECTED_ERROR"));
+        }
+    }
+
+    @Test
+    public void unexpectedErrorDoesNotLeakWebhookSecret() throws Exception {
+        // A trailing space makes URI.create throw before any network I/O, embedding the full URL — and its
+        // secret token — in the exception message. The REAL WebhookSender is required (it is what calls
+        // URI.create). The scrub must keep the failure visible while removing the secret.
+        String secretUrl = "http://hooks.slack.test/services/T0/B1/SUPERSECRETTOKEN ZZZ";
+        SlackTestHelpers.installSeams(new WebhookSender());
+        SlackTestHelpers.addWebhookCredential("wh", secretUrl);
+        SlackTestHelpers.config().setDefaultWebhookCredentialId("wh");
+
+        try (LogCapture logs = new LogCapture(FailureLogThrottle.class)) {
+            fireSuccessNotification();
+            // The failure is surfaced (the whole point of #15) ...
+            assertEquals(1, logs.warningCount());
+            // ... but the secret token and the credential path never reach the log. No category is
+            // asserted: the guarantee must hold wherever the scrub lands.
+            assertEquals(0, logs.warningsContaining("SUPERSECRETTOKEN"));
+            assertEquals(0, logs.warningsContaining("/services/"));
+        }
+    }
+
+    @Test
+    public void queueSaturatedLogsWarning() throws Exception {
+        CountDownLatch gate = new CountDownLatch(1);
+        ThreadPoolExecutor saturated =
+                new ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<>(1), daemonFactory());
+        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(daemonFactory());
+        TestWebhookSender sender = new TestWebhookSender();
+        sender.blockOn(gate); // the first attempt occupies the sole worker until the gate opens
+        NotificationDispatcher dispatcher = NotificationDispatcher.get();
+        dispatcher.installTestSeams(saturated, scheduler, sender, System::currentTimeMillis);
+        SlackTestHelpers.addWebhookCredential("wh", "http://example.test/hook");
+
+        FreeStyleBuild build = j.buildAndAssertSuccess(j.createFreeStyleProject("host"));
+        try (LogCapture logs = new LogCapture(FailureLogThrottle.class)) {
+            // 1 occupies the worker, 1 fills the queue, the rest overflow a still-running (not shut down)
+            // pool → genuine saturation, collapsed by the throttle to one WARNING.
+            for (int i = 0; i < 4; i++) {
+                dispatcher.dispatch(new NotificationContext(
+                        build, TaskListener.NULL, null, "wh", "text", "#000000", null, EventType.SUCCESS));
+            }
+            assertEquals(1, logs.warningsContaining("QUEUE_SATURATED"));
+        } finally {
+            gate.countDown();
+            dispatcher.awaitAllDispatched(15, TimeUnit.SECONDS);
+        }
+    }
+
+    @Test
+    public void everyFailureCategoryIsAccountedFor() {
+        // Tripwire: a new FailureCategory added without updating this set (and giving it visibility
+        // coverage) fails the build, so no dispatch-failure class slips in unsignaled.
+        EnumSet<FailureCategory> asserted = EnumSet.of(
+                FailureCategory.CREDENTIAL_MISSING,
+                FailureCategory.RENDER_DEGRADED,
+                FailureCategory.RENDER_FALLBACK,
+                FailureCategory.RENDER_ABORTED,
+                FailureCategory.HTTP_CLIENT_ERROR,
+                FailureCategory.HTTP_SERVER_ERROR,
+                FailureCategory.TRANSPORT_ERROR,
+                FailureCategory.UNEXPECTED_ERROR,
+                FailureCategory.QUEUE_SATURATED);
+        assertEquals(EnumSet.allOf(FailureCategory.class), asserted);
+    }
+
+    private static ThreadFactory daemonFactory() {
+        AtomicInteger counter = new AtomicInteger();
+        return runnable -> {
+            Thread t = new Thread(runnable, "dispatch-visibility-test-" + counter.incrementAndGet());
+            t.setDaemon(true);
+            return t;
+        };
     }
 
     private void installWithCredential(WebhookSender sender) throws Exception {

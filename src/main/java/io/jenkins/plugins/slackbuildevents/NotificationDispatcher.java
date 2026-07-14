@@ -11,6 +11,7 @@ import hudson.ExtensionList;
 import hudson.init.Terminator;
 import hudson.model.Run;
 import hudson.security.ACL;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -160,9 +161,13 @@ public class NotificationDispatcher {
             ex.execute(() -> runAttempt(op));
         } catch (RejectedExecutionException e) {
             droppedCount.incrementAndGet();
-            // Route through the throttle so a saturated pool collapses to one line per window instead
-            // of one per dropped notification. Signature is category-only (global, no credential).
-            signalQueueSaturated();
+            // A rejection while the pool is shutting down is a teardown drop, not real saturation: stay
+            // quiet (still counted in droppedCount) so a controller restart does not emit false "queue
+            // saturated" WARNINGs. Only a genuinely saturated, still-running pool is signaled — routed
+            // through the throttle so it collapses to one line per window (category-only signature).
+            if (!ex.isShutdown()) {
+                signalQueueSaturated();
+            }
             finish(op);
         }
         return op.future;
@@ -170,8 +175,10 @@ public class NotificationDispatcher {
 
     private void runAttempt(Operation op) {
         NotificationContext context = op.context;
+        // Hoisted so the catch can hand it to the redaction layer (the send-path secret).
+        String webhookUrl = null;
         try {
-            String webhookUrl = lookupWebhookUrl(context.webhookCredentialId());
+            webhookUrl = lookupWebhookUrl(context.webhookCredentialId());
             if (webhookUrl == null || webhookUrl.isEmpty()) {
                 // Credential absent/rotated away → a visible, rate-limited WARNING (was a silent no-op).
                 signalCredentialMissing(context);
@@ -180,15 +187,18 @@ public class NotificationDispatcher {
             }
             RenderOutcome outcome = render(context);
             if (outcome.category() == RenderCategory.ABORTED) {
-                // Interrupt during render (pool shutting down): send nothing, signal nothing. This takes
-                // priority over every WARNING mapping so a shutdown is never mistaken for a fallback.
+                // Interrupt surfaced during render. A genuine shutdown interrupt and a spurious wrapped
+                // one are indistinguishable from the cause chain, so surface a rate-limited WARNING (was a
+                // silent drop) rather than lose a possibly-genuine notification with no operator signal.
+                // Still send nothing; the throttle bounds any restart-time noise to one line per window.
+                signalRenderAborted(context);
                 finish(op);
                 return;
             }
             RenderFailureEvent failure = outcome.event();
             if (failure != null) {
                 // DEGRADED/FALLBACK: signal before sending, per the failure-signal seam.
-                signalRenderFailure(context, failure);
+                signalRenderFailure(failure);
             }
             String text = outcome.text();
             if (text == null) {
@@ -215,16 +225,24 @@ public class NotificationDispatcher {
             signalHttpOutcome(context, response.statusCode());
             finish(op);
         } catch (Throwable t) {
-            // Isolation: transport failures and unexpected runtime errors land here. Distinguish and
-            // signal them so the operator sees a WARNING (was FINE-only, invisible at default level).
-            signalTransportFailure(context, t);
-            finish(op);
+            // Isolation: transport failures and unexpected runtime/JVM errors land here. Signal them so
+            // the operator sees a WARNING (was FINE-only, invisible at default level). The finish() is in
+            // a finally so a throw from the signal path never leaks the future; an Error is rethrown AFTER
+            // finishing so the ThreadPoolExecutor discards and replaces the possibly-corrupted worker.
+            try {
+                signalTransportFailure(context, t, webhookUrl);
+            } finally {
+                finish(op);
+            }
+            if (t instanceof Error) {
+                throw (Error) t;
+            }
         }
     }
 
     // ---- Failure-signal seam: every dispatch-path failure funnels through the rate-limiting throttle.
 
-    private void recordWarning(@NonNull String signature, @NonNull Supplier<String> messageSupplier) {
+    private void recordWarning(@NonNull String signature, @NonNull Supplier<FailureMessage> messageSupplier) {
         failureLog.recordFailure(signature, clock.getAsLong(), messageSupplier);
     }
 
@@ -232,31 +250,38 @@ public class NotificationDispatcher {
         String signature = signatureOf(FailureCategory.CREDENTIAL_MISSING, context.webhookCredentialId());
         recordWarning(
                 signature,
-                () -> "Slack notification " + FailureCategory.CREDENTIAL_MISSING + ": " + describe(context)
-                        + " — webhook credential not found (removed or rotated). No notification was sent.");
+                () -> new FailureMessage("Slack notification " + FailureCategory.CREDENTIAL_MISSING + ": "
+                        + describe(context)
+                        + " — webhook credential not found (removed or rotated). No notification was sent."));
     }
 
-    private void signalRenderFailure(@NonNull NotificationContext context, @NonNull RenderFailureEvent event) {
+    private void signalRenderFailure(@NonNull RenderFailureEvent event) {
+        FailureCategory category = categoryOf(event.category);
+        String signature;
         if (event.category == RenderCategory.DEGRADED) {
             // Signature: category + credentialId + templateDigest (+ failedMacroHint when present).
-            String signature = (event.failedMacroHint != null)
+            signature = (event.failedMacroHint != null)
                     ? signatureOf(
-                            FailureCategory.RENDER_DEGRADED,
-                            event.webhookCredentialId,
-                            templateDigest(event.template),
-                            event.failedMacroHint)
-                    : signatureOf(
-                            FailureCategory.RENDER_DEGRADED, event.webhookCredentialId, templateDigest(event.template));
-            recordWarning(signature, () -> renderMessage(context, event));
+                            category, event.webhookCredentialId, templateDigest(event.template), event.failedMacroHint)
+                    : signatureOf(category, event.webhookCredentialId, templateDigest(event.template));
         } else {
             // FALLBACK signature: category + credentialId + templateDigest + unwrapped root cause class.
-            String signature = signatureOf(
-                    FailureCategory.RENDER_FALLBACK,
+            signature = signatureOf(
+                    category,
                     event.webhookCredentialId,
                     templateDigest(event.template),
                     event.rootCause.getClass().getName());
-            recordWarning(signature, () -> renderMessage(context, event));
         }
+        recordWarning(signature, () -> renderMessage(event));
+    }
+
+    private void signalRenderAborted(@NonNull NotificationContext context) {
+        String signature = signatureOf(FailureCategory.RENDER_ABORTED, context.webhookCredentialId());
+        recordWarning(
+                signature,
+                () -> new FailureMessage("Slack notification " + FailureCategory.RENDER_ABORTED + ": "
+                        + describe(context)
+                        + " — render was interrupted; the notification was not sent."));
     }
 
     private void signalHttpOutcome(@NonNull NotificationContext context, int statusCode) {
@@ -275,50 +300,53 @@ public class NotificationDispatcher {
             return; // 1xx/3xx: not a failure we signal
         }
         String signature = signatureOf(category, context.webhookCredentialId(), Integer.toString(statusCode));
-        recordWarning(signature, () -> "Slack notification " + category + ": " + describe(context)
+        recordWarning(signature, () -> new FailureMessage("Slack notification " + category + ": " + describe(context)
                 + " — Slack webhook returned HTTP " + statusCode + ". "
                 + (category == FailureCategory.HTTP_SERVER_ERROR
                         ? "Slack-side error; not retried."
-                        : "Check the webhook URL and configuration."));
+                        : "Check the webhook URL and configuration.")));
     }
 
-    private void signalTransportFailure(@NonNull NotificationContext context, @NonNull Throwable t) {
+    private void signalTransportFailure(
+            @NonNull NotificationContext context, @NonNull Throwable t, @CheckForNull String webhookUrl) {
         if (t instanceof InterruptedException || hasInterruptedCause(t)) {
             // Pool shutting down mid-send → restore the flag and stay QUIET (not a real transport error).
             Thread.currentThread().interrupt();
             return;
         }
+        // The only checked exception send() can throw (other than the interrupt handled above) is
+        // IOException; a genuine transport failure. Everything else — a RuntimeException or a JVM Error —
+        // is unexpected, so it must not claim a network failure.
         FailureCategory category =
-                (t instanceof RuntimeException) ? FailureCategory.UNEXPECTED_ERROR : FailureCategory.TRANSPORT_ERROR;
+                (t instanceof IOException) ? FailureCategory.TRANSPORT_ERROR : FailureCategory.UNEXPECTED_ERROR;
         String signature = signatureOf(category, context.webhookCredentialId(), t.getClass().getName());
-        recordWarning(signature, () -> "Slack notification " + category + ": " + describe(context)
-                + " — " + summarize(t) + "."
+        recordWarning(signature, () -> new FailureMessage("Slack notification " + category + ": " + describe(context)
+                + " — " + scrubForLog(redactSecret(summarize(t), webhookUrl)) + "."
                 + (category == FailureCategory.TRANSPORT_ERROR
                         ? " Network/transport failure reaching Slack."
-                        : " Unexpected error while sending."));
+                        : " Unexpected error while sending.")));
     }
 
     private void signalQueueSaturated() {
         recordWarning(
                 FailureCategory.QUEUE_SATURATED.name(),
-                () -> "Slack notification " + FailureCategory.QUEUE_SATURATED
-                        + ": dispatch queue saturated; notification dropped. The dispatch pool is at capacity.");
+                () -> new FailureMessage("Slack notification " + FailureCategory.QUEUE_SATURATED
+                        + ": dispatch queue saturated; notification dropped. The dispatch pool is at capacity."));
     }
 
-    private static String renderMessage(@NonNull NotificationContext context, @NonNull RenderFailureEvent event) {
-        FailureCategory category = (event.category == RenderCategory.DEGRADED)
-                ? FailureCategory.RENDER_DEGRADED
-                : FailureCategory.RENDER_FALLBACK;
+    private static FailureMessage renderMessage(@NonNull RenderFailureEvent event) {
+        FailureCategory category = categoryOf(event.category);
         String guidance = (event.category == RenderCategory.DEGRADED)
                 ? "Some tokens could not be expanded; the notification was sent with those tokens left as literals."
                 : "The template could not be rendered; a minimal fallback notification was sent instead.";
-        // Header uses the event's own captured context; build number comes from the run (not on the event).
-        return "Slack notification " + category + ": job '" + event.jobFullName + "' build #"
-                + context.run().getNumber() + " event " + event.event + " credential '" + event.webhookCredentialId
-                + "'" + (event.failedMacroHint != null ? " token '" + event.failedMacroHint + "'" : "")
-                + " — " + summarize(event.rootCause) + ". " + guidance
-                // Full stack of the original throwable, for the system log (rate-limited to one per window).
-                + "\n" + stackTraceOf(event.cause);
+        // All header fields come from the event (one consistent provenance, including the build number).
+        String headline = "Slack notification " + category + ": "
+                + header(event.jobFullName, event.buildNumber, event.event, event.webhookCredentialId)
+                + (event.failedMacroHint != null ? " token '" + event.failedMacroHint + "'" : "")
+                + " — " + scrubForLog(summarize(event.rootCause)) + ". " + guidance;
+        // Full stack goes in the detail, below the headline, so a piggybacked suppression count stays on
+        // line 1. Rate-limited to one per window.
+        return new FailureMessage(headline, stackTraceOf(event.cause));
     }
 
     @NonNull
@@ -330,19 +358,80 @@ public class NotificationDispatcher {
 
     @NonNull
     private static String describe(@NonNull NotificationContext context) {
-        return "job '" + context.run().getParent().getFullName()
-                + "' build #" + context.run().getNumber()
-                + " event " + context.event()
-                + " credential '" + context.webhookCredentialId() + "'";
+        return header(
+                context.run().getParent().getFullName(),
+                context.run().getNumber(),
+                context.event(),
+                context.webhookCredentialId());
     }
 
+    /** The common "job '…' build #… event … credential '…'" prefix shared by every WARNING body. */
+    @NonNull
+    private static String header(
+            @NonNull String jobFullName,
+            int buildNumber,
+            @NonNull EventType event,
+            @NonNull String webhookCredentialId) {
+        return "job '" + jobFullName + "' build #" + buildNumber
+                + " event " + event + " credential '" + webhookCredentialId + "'";
+    }
+
+    /** Maps a render disposition to its failure category — the single source for this mapping. */
+    @NonNull
+    private static FailureCategory categoryOf(@NonNull RenderCategory renderCategory) {
+        return (renderCategory == RenderCategory.DEGRADED)
+                ? FailureCategory.RENDER_DEGRADED
+                : FailureCategory.RENDER_FALLBACK;
+    }
+
+    /**
+     * Total, self-scrubbing one-line summary of a throwable. Guards {@code getMessage()} so it never
+     * throws. Callers apply {@link #scrubForLog} — and, on the send path where a secret is in hand,
+     * {@link #redactSecret} first — around this value before it reaches the log.
+     */
     @NonNull
     private static String summarize(@CheckForNull Throwable t) {
         if (t == null) {
             return "unknown cause";
         }
-        String message = t.getMessage();
+        String message;
+        try {
+            message = t.getMessage();
+        } catch (RuntimeException e) {
+            // A hostile/broken getMessage() must not sink the whole failure signal.
+            message = "<message unavailable>";
+        }
         return message == null ? t.getClass().getName() : t.getClass().getName() + ": " + message;
+    }
+
+    /**
+     * Replaces the exact webhook URL (which carries the Slack secret) with a placeholder, so a throwable
+     * whose message embeds the raw URL — e.g. {@code URI.create}'s {@code IllegalArgumentException} on a
+     * malformed URL — cannot leak the secret into the system log. Send path only; the render path never
+     * holds a secret. Applied to the raw summary before {@link #scrubForLog}, so a control character in the
+     * URL cannot defeat the exact-match removal.
+     */
+    @NonNull
+    private static String redactSecret(@NonNull String message, @CheckForNull String webhookUrl) {
+        if (webhookUrl == null || webhookUrl.isEmpty()) {
+            return message;
+        }
+        return message.replace(webhookUrl, "<redacted-webhook-url>");
+    }
+
+    /**
+     * Folds CR/LF/TAB and other C0 control characters to spaces, so a crafted throwable message cannot
+     * forge additional log lines. Applied to the one-line {@link #summarize} output only — never to the
+     * intentional multi-line stack-trace detail the render path attaches separately.
+     */
+    @NonNull
+    private static String scrubForLog(@NonNull String value) {
+        StringBuilder scrubbed = new StringBuilder(value.length());
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            scrubbed.append(c < 0x20 ? ' ' : c);
+        }
+        return scrubbed.toString();
     }
 
     @NonNull
@@ -491,7 +580,7 @@ public class NotificationDispatcher {
     private static boolean hasInterruptedCause(@NonNull Throwable throwable) {
         Throwable current = throwable;
         int guard = 0;
-        while (current != null && guard++ < 16) {
+        while (current != null && guard++ < RenderFailureEvent.MAX_CAUSE_CHAIN_DEPTH) {
             if (current instanceof InterruptedException) {
                 return true;
             }
@@ -507,15 +596,22 @@ public class NotificationDispatcher {
     @NonNull
     private static RenderFailureEvent failureEvent(
             @NonNull RenderCategory category, @NonNull NotificationContext context, @NonNull Throwable cause) {
+        Throwable rootCause = RenderFailureEvent.unwrap(cause);
+        // The hint only sharpens the DEGRADED suppression signature, and it must be parsed from the
+        // unwrapped root cause: the outer wrapper's message is the constant "Error processing tokens",
+        // which carries no token name, so parsing the wrapper would yield null on the dominant
+        // unrecognized-macro path. FALLBACK's root cause is an arbitrary macro throwable, so no hint.
+        String hint = (category == RenderCategory.DEGRADED) ? parseFailedMacroHint(rootCause) : null;
         return new RenderFailureEvent(
                 category,
                 cause,
-                RenderFailureEvent.unwrap(cause),
+                rootCause,
                 context.run().getParent().getFullName(),
+                context.run().getNumber(),
                 context.event(),
                 context.webhookCredentialId(),
                 context.template(),
-                parseFailedMacroHint(cause));
+                hint);
     }
 
     /**
