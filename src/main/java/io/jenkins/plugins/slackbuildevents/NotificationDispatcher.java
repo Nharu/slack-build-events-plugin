@@ -200,14 +200,20 @@ public class NotificationDispatcher {
             finish(op);
         } catch (Throwable t) {
             // Isolation: success, 500, timeout, missing-credential no-op all land here safely. Log only
-            // the sanitized scheme+host and the exception class name — never the exception message or a
-            // stack trace, which can carry the raw webhook URL (secret path/token): e.g. URI.create(url)
-            // throws IllegalArgumentException whose message embeds the URL on the unrestricted
-            // (config == null) path, and nested causes can hold it too.
+            // the credential reference id, the sanitized scheme+host and the exception class name —
+            // never the exception message or a stack trace, which can carry the raw webhook URL (secret
+            // path/token): e.g. URI.create(url) throws IllegalArgumentException whose message embeds the
+            // URL on the unrestricted (config == null) path, and nested causes can hold it too.
+            // The credential id names which webhook configuration failed (a lookup key, never the
+            // secret); its control characters are replaced so it cannot forge a log line.
             LOGGER.log(
                     Level.FINE,
-                    "Slack notification attempt failed for {0} ({1})",
-                    new Object[] {WebhookUrlPolicy.describeSafely(webhookUrl), t.getClass().getName()});
+                    "Slack notification attempt failed for credential ''{0}'' targeting {1} ({2})",
+                    new Object[] {
+                        op.context.webhookCredentialId().replaceAll("\\p{Cntrl}", "?"),
+                        WebhookUrlPolicy.describeSafely(webhookUrl),
+                        t.getClass().getName()
+                    });
             finish(op);
         }
     }
