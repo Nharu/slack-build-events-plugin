@@ -20,6 +20,7 @@ import io.jenkins.plugins.casc.misc.JenkinsConfiguredWithCodeRule;
 import io.jenkins.plugins.casc.model.CNode;
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import org.junit.Rule;
 import org.junit.Test;
 
@@ -44,6 +45,9 @@ public class JCasCRoundTripTest {
         assertEquals("#36a64f", config.getDefaultColor());
         assertEquals("slack-default-cred", config.getDefaultWebhookCredentialId());
         assertEquals(4, config.getMaxRetriesOn429());
+        assertTrue(config.isHttpsOnly());
+        // Stored verbatim — case is preserved (normalization happens only at compare time).
+        assertEquals(List.of("HOOKS.slack.com", "mattermost.internal"), config.getWebhookHostAllowlist());
         assertEquals("global-start-tmpl", config.getDefaultStartTemplate());
         assertEquals("global-success-tmpl", config.getDefaultSuccessTemplate());
         assertEquals("global-failure-tmpl", config.getDefaultFailureTemplate());

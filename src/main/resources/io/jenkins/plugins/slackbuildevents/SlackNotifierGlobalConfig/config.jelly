@@ -15,6 +15,18 @@
       <f:number clazz="positive-number" default="1" min="0" max="5"/>
     </f:entry>
 
+    <f:entry title="Webhook host allowlist" field="webhookHostAllowlist"
+             help="/plugin/slack-build-events/help-webhookHostAllowlist.html">
+      <f:repeatable var="host" items="${instance.webhookHostAllowlist}" add="Add host">
+        <f:textbox name="webhookHostAllowlist" value="${host}"/>
+      </f:repeatable>
+    </f:entry>
+
+    <f:entry title="Require HTTPS webhook URLs" field="httpsOnly"
+             help="/plugin/slack-build-events/help-httpsOnly.html">
+      <f:checkbox/>
+    </f:entry>
+
     <f:advanced title="Default templates and color">
       <f:entry title="Default color override" field="defaultColor">
         <f:textbox/>

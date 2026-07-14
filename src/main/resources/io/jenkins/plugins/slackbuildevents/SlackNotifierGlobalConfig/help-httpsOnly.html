@@ -1,0 +1,7 @@
+<div>
+  Optional SSRF hardening. When checked, only <code>https</code> webhook URLs are sent;
+  a plain <code>http</code> URL is blocked at send time. When unchecked (default), both
+  <code>http</code> and <code>https</code> are allowed so self-hosted Slack-compatible
+  receivers over internal HTTP keep working. Combined with the host allowlist using
+  <b>AND</b> — a URL must satisfy both controls to be sent.
+</div>

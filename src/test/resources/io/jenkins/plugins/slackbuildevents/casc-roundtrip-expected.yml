@@ -7,6 +7,7 @@ defaultStartTemplate: "global-start-tmpl"
 defaultSuccessTemplate: "global-success-tmpl"
 defaultUnstableTemplate: "global-unstable-tmpl"
 defaultWebhookCredentialId: "slack-default-cred"
+httpsOnly: true
 maxRetriesOn429: 4
 rules:
 - abortedTemplate: "z-aborted"
@@ -36,3 +37,6 @@ rules:
   successTemplate: "a-success"
   unstableTemplate: "a-unstable"
   webhookCredentialId: "slack-alpha-cred"
+webhookHostAllowlist:
+- "HOOKS.slack.com"
+- "mattermost.internal"

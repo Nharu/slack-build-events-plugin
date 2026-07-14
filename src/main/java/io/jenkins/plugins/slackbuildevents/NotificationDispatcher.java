@@ -158,10 +158,25 @@ public class NotificationDispatcher {
     }
 
     private void runAttempt(Operation op) {
+        // Hoisted so the catch-all can log the (sanitized) target even if credential lookup threw.
+        String webhookUrl = null;
         try {
-            String webhookUrl = lookupWebhookUrl(op.context.webhookCredentialId());
+            webhookUrl = lookupWebhookUrl(op.context.webhookCredentialId());
             if (webhookUrl == null || webhookUrl.isEmpty()) {
                 // Credential absent/rotated away → silent no-op.
+                finish(op);
+                return;
+            }
+            // SSRF hardening at the authoritative send point (a stub sender would bypass a
+            // WebhookSender-level check). null config → unrestricted, mirroring currentMaxRetries.
+            SlackNotifierGlobalConfig config = SlackNotifierGlobalConfig.get();
+            if (config != null
+                    && !WebhookUrlPolicy.isAllowed(webhookUrl, config.isHttpsOnly(), config.getWebhookHostAllowlist())) {
+                // Log scheme+host only — never the secret path/token — then terminate best-effort.
+                LOGGER.log(
+                        Level.WARNING,
+                        "Slack notification blocked by webhook URL policy: {0}",
+                        WebhookUrlPolicy.describeSafely(webhookUrl));
                 finish(op);
                 return;
             }
@@ -184,8 +199,15 @@ public class NotificationDispatcher {
             // 2xx / other 4xx / 5xx → terminal best-effort (no further retry).
             finish(op);
         } catch (Throwable t) {
-            // Isolation: success, 500, timeout, missing-credential no-op all land here safely.
-            LOGGER.log(Level.FINE, "Slack notification attempt failed", t);
+            // Isolation: success, 500, timeout, missing-credential no-op all land here safely. Log only
+            // the sanitized scheme+host and the exception class name — never the exception message or a
+            // stack trace, which can carry the raw webhook URL (secret path/token): e.g. URI.create(url)
+            // throws IllegalArgumentException whose message embeds the URL on the unrestricted
+            // (config == null) path, and nested causes can hold it too.
+            LOGGER.log(
+                    Level.FINE,
+                    "Slack notification attempt failed for {0} ({1})",
+                    new Object[] {WebhookUrlPolicy.describeSafely(webhookUrl), t.getClass().getName()});
             finish(op);
         }
     }
