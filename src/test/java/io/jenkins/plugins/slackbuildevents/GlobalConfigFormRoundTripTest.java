@@ -21,11 +21,23 @@ public class GlobalConfigFormRoundTripTest {
     public JenkinsRule j = new JenkinsRule();
 
     @Test
+    public void optInDefaultsAreUnrestricted() {
+        SlackNotifierGlobalConfig config = SlackNotifierGlobalConfig.get();
+        assertNotNull(config);
+        // The only defaults under which the existing HTTP tests stay green: no allowlist,
+        // http permitted. Getters must be non-null and empty/false out of the box.
+        assertTrue(config.getWebhookHostAllowlist().isEmpty());
+        assertFalse(config.isHttpsOnly());
+    }
+
+    @Test
     public void formSubmitPreservesAllFields() throws Exception {
         SlackNotifierGlobalConfig config = SlackNotifierGlobalConfig.get();
         assertNotNull(config);
         config.setDefaultChannel("#ops");
         config.setMaxRetriesOn429(3);
+        config.setHttpsOnly(true);
+        config.setWebhookHostAllowlist(List.of("HOOKS.slack.com", "mattermost.internal"));
         config.setDefaultColor("#36a64f");
         config.setDefaultStartTemplate("start ${SLACK_BUILD_URL}");
         config.setDefaultSuccessTemplate("ok");
@@ -42,6 +54,9 @@ public class GlobalConfigFormRoundTripTest {
         assertNotNull(after);
         assertEquals("#ops", after.getDefaultChannel());
         assertEquals(3, after.getMaxRetriesOn429());
+        assertTrue(after.isHttpsOnly());
+        // Verbatim round-trip through the form: case preserved, order preserved.
+        assertEquals(List.of("HOOKS.slack.com", "mattermost.internal"), after.getWebhookHostAllowlist());
         assertEquals("#36a64f", after.getDefaultColor());
         assertEquals("start ${SLACK_BUILD_URL}", after.getDefaultStartTemplate());
         assertEquals("ok", after.getDefaultSuccessTemplate());
