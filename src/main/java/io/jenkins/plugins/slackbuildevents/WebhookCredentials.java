@@ -1,13 +1,16 @@
 package io.jenkins.plugins.slackbuildevents;
 
 import com.cloudbees.plugins.credentials.CredentialsMatchers;
+import com.cloudbees.plugins.credentials.CredentialsProvider;
 import com.cloudbees.plugins.credentials.common.StandardListBoxModel;
 import com.cloudbees.plugins.credentials.domains.DomainRequirement;
 import edu.umd.cs.findbugs.annotations.CheckForNull;
 import edu.umd.cs.findbugs.annotations.NonNull;
 import hudson.security.ACL;
+import hudson.util.FormValidation;
 import hudson.util.ListBoxModel;
 import java.util.Collections;
+import java.util.List;
 import jenkins.model.Jenkins;
 import org.jenkinsci.plugins.plaincredentials.StringCredentials;
 
@@ -37,5 +40,42 @@ final class WebhookCredentials {
                         Collections.<DomainRequirement>emptyList(),
                         CredentialsMatchers.always())
                 .includeCurrentValue(currentValue == null ? "" : currentValue);
+    }
+
+    /** Resolves the plaintext webhook URL behind a credential id, or {@code null} if unavailable. */
+    @CheckForNull
+    static String resolveUrl(@CheckForNull String credentialId) {
+        if (credentialId == null || credentialId.isEmpty()) {
+            return null;
+        }
+        Jenkins jenkins = Jenkins.getInstanceOrNull();
+        if (jenkins == null) {
+            return null;
+        }
+        List<StringCredentials> all = CredentialsProvider.lookupCredentialsInItemGroup(
+                StringCredentials.class, jenkins, ACL.SYSTEM2, Collections.<DomainRequirement>emptyList());
+        StringCredentials match = CredentialsMatchers.firstOrNull(all, CredentialsMatchers.withId(credentialId));
+        return match == null ? null : match.getSecret().getPlainText();
+    }
+
+    /**
+     * Best-effort admin-facing check that the webhook URL behind {@code credentialId} would pass
+     * the currently-stored SSRF policy (host allowlist + https-only). Warn-only — the authoritative
+     * guard is at send time — and never surfaces the raw URL or a parse exception message.
+     */
+    @NonNull
+    static FormValidation checkUrlPolicy(@CheckForNull String credentialId) {
+        String url = resolveUrl(credentialId);
+        if (url == null) {
+            return FormValidation.ok();
+        }
+        SlackNotifierGlobalConfig config = SlackNotifierGlobalConfig.get();
+        if (config == null
+                || WebhookUrlPolicy.isAllowed(url, config.isHttpsOnly(), config.getWebhookHostAllowlist())) {
+            return FormValidation.ok();
+        }
+        return FormValidation.warning(
+                "This webhook URL would be blocked at send time by the configured host allowlist / "
+                        + "https-only policy.");
     }
 }

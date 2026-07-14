@@ -153,12 +153,19 @@ public class DispatchVisibilityTest {
     }
 
     @Test
-    public void unexpectedErrorDoesNotLeakWebhookSecret() throws Exception {
-        // A trailing space makes URI.create throw before any network I/O, embedding the full URL — and its
-        // secret token — in the exception message. The REAL WebhookSender is required (it is what calls
-        // URI.create). The scrub must keep the failure visible while removing the secret.
-        String secretUrl = "http://hooks.slack.test/services/T0/B1/SUPERSECRETTOKEN ZZZ";
-        SlackTestHelpers.installSeams(new WebhookSender());
+    public void transportFailureDoesNotLeakWebhookSecret() throws Exception {
+        // A well-formed URL that passes the send-time policy, so the flow reaches send(); the sender then
+        // fails with the raw URL — including its secret token — embedded in the exception message, as a
+        // real HTTP client can. The scrub must keep the failure visible while removing the secret from the
+        // WARNING. No category is asserted: the guarantee must hold wherever the scrub lands.
+        String secretUrl = "http://hooks.slack.test/services/T0/B1/SUPERSECRETTOKEN";
+        WebhookSender leaking = new WebhookSender() {
+            @Override
+            Response send(String url, String jsonBody) throws IOException {
+                throw new IOException("connection failed reaching " + url);
+            }
+        };
+        SlackTestHelpers.installSeams(leaking);
         SlackTestHelpers.addWebhookCredential("wh", secretUrl);
         SlackTestHelpers.config().setDefaultWebhookCredentialId("wh");
 
@@ -166,8 +173,7 @@ public class DispatchVisibilityTest {
             fireSuccessNotification();
             // The failure is surfaced (the whole point of #15) ...
             assertEquals(1, logs.warningCount());
-            // ... but the secret token and the credential path never reach the log. No category is
-            // asserted: the guarantee must hold wherever the scrub lands.
+            // ... but the secret token and the credential path never reach the log.
             assertEquals(0, logs.warningsContaining("SUPERSECRETTOKEN"));
             assertEquals(0, logs.warningsContaining("/services/"));
         }

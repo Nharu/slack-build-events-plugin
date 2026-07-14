@@ -175,13 +175,27 @@ public class NotificationDispatcher {
 
     private void runAttempt(Operation op) {
         NotificationContext context = op.context;
-        // Hoisted so the catch can hand it to the redaction layer (the send-path secret).
+        // Hoisted so the catch can hand it to the redaction layer (the send-path secret) and so the SSRF
+        // guard can run even if credential lookup threw.
         String webhookUrl = null;
         try {
             webhookUrl = lookupWebhookUrl(context.webhookCredentialId());
             if (webhookUrl == null || webhookUrl.isEmpty()) {
                 // Credential absent/rotated away → a visible, rate-limited WARNING (was a silent no-op).
                 signalCredentialMissing(context);
+                finish(op);
+                return;
+            }
+            // SSRF hardening at the authoritative send point (a stub sender would bypass a
+            // WebhookSender-level check). null config → unrestricted, mirroring currentMaxRetries.
+            SlackNotifierGlobalConfig config = SlackNotifierGlobalConfig.get();
+            if (config != null
+                    && !WebhookUrlPolicy.isAllowed(webhookUrl, config.isHttpsOnly(), config.getWebhookHostAllowlist())) {
+                // Log scheme+host only — never the secret path/token — then terminate best-effort.
+                LOGGER.log(
+                        Level.WARNING,
+                        "Slack notification blocked by webhook URL policy: {0}",
+                        WebhookUrlPolicy.describeSafely(webhookUrl));
                 finish(op);
                 return;
             }

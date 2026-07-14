@@ -4,6 +4,10 @@ unclassified:
     defaultColor: "#36a64f"
     defaultWebhookCredentialId: "slack-default-cred"
     maxRetriesOn429: 4
+    httpsOnly: true
+    webhookHostAllowlist:
+      - "HOOKS.slack.com"
+      - "mattermost.internal"
     defaultStartTemplate: "global-start-tmpl"
     defaultSuccessTemplate: "global-success-tmpl"
     defaultFailureTemplate: "global-failure-tmpl"

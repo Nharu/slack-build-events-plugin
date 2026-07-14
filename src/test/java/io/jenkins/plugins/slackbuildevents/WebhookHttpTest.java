@@ -1,10 +1,13 @@
 package io.jenkins.plugins.slackbuildevents;
 
 import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
+import static com.github.tomakehurst.wiremock.client.WireMock.any;
+import static com.github.tomakehurst.wiremock.client.WireMock.anyRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.anyUrl;
 import static com.github.tomakehurst.wiremock.client.WireMock.post;
 import static com.github.tomakehurst.wiremock.client.WireMock.postRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.stubFor;
+import static com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo;
 import static com.github.tomakehurst.wiremock.client.WireMock.verify;
 import static com.github.tomakehurst.wiremock.core.WireMockConfiguration.options;
 
@@ -62,5 +65,21 @@ public class WebhookHttpTest {
         SlackTestHelpers.awaitDispatch();
 
         verify(2, postRequestedFor(anyUrl()));
+    }
+
+    @Test
+    public void redirectResponseIsNotFollowed() throws Exception {
+        // Redirect.NEVER linchpin: a 302 must NOT trigger a second request to the redirect target,
+        // which could reach an internal host and bypass the webhook host allowlist (SSRF). No source
+        // change — this pins the default HttpClient policy end-to-end so a future NORMAL/ALWAYS regresses.
+        stubFor(post(urlEqualTo("/")).willReturn(aResponse().withStatus(302).withHeader("Location", "/internal")));
+        stubFor(any(urlEqualTo("/internal")).willReturn(aResponse().withStatus(200)));
+        SlackTestHelpers.config().setRules(List.of(SlackTestHelpers.rule("myjob", List.of("start"))));
+
+        j.buildAndAssertSuccess(j.createFreeStyleProject("myjob"));
+        SlackTestHelpers.awaitDispatch();
+
+        verify(1, postRequestedFor(urlEqualTo("/")));
+        verify(0, anyRequestedFor(urlEqualTo("/internal")));
     }
 }
