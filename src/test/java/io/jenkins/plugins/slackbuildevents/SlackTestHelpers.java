@@ -11,6 +11,7 @@ import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.LongSupplier;
 import org.jenkinsci.plugins.plaincredentials.StringCredentials;
 import org.jenkinsci.plugins.plaincredentials.impl.StringCredentialsImpl;
 
@@ -29,9 +30,14 @@ final class SlackTestHelpers {
 
     /** Installs deterministic seams (daemon pools so the JVM never hangs at exit). */
     static void installSeams(WebhookSender sender) {
+        installSeamsWithClock(sender, System::currentTimeMillis);
+    }
+
+    /** Same as {@link #installSeams} but with an injected clock, for deterministic suppression-window tests. */
+    static void installSeamsWithClock(WebhookSender sender, LongSupplier clock) {
         ExecutorService executor = Executors.newFixedThreadPool(2, daemonFactory("test-dispatch"));
         ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(daemonFactory("test-sched"));
-        NotificationDispatcher.get().installTestSeams(executor, scheduler, sender, System::currentTimeMillis);
+        NotificationDispatcher.get().installTestSeams(executor, scheduler, sender, clock);
     }
 
     static void awaitDispatch() throws InterruptedException, TimeoutException {

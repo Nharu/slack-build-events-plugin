@@ -72,12 +72,12 @@ public class StartBranchRenderTest {
 
         // A: hint set, but the template throws so render takes the raw-template fallback.
         d.dispatch(new NotificationContext(
-                build, TaskListener.NULL, null, "wh", "${SLACK_TEST_THROW}", "#000000", "leakybranch"));
+                build, TaskListener.NULL, null, "wh", "${SLACK_TEST_THROW}", "#000000", "leakybranch", EventType.START));
         d.awaitAllDispatched(15, TimeUnit.SECONDS);
 
         // B: no hint; must resolve via the normal chain (N/A) on the same single worker.
         d.dispatch(new NotificationContext(
-                build, TaskListener.NULL, null, "wh", "branch=${SLACK_GIT_BRANCH}", "#000000", null));
+                build, TaskListener.NULL, null, "wh", "branch=${SLACK_GIT_BRANCH}", "#000000", null, EventType.START));
         d.awaitAllDispatched(15, TimeUnit.SECONDS);
 
         String bodyB = text(sender.bodies.get(1));
@@ -98,7 +98,8 @@ public class StartBranchRenderTest {
 
         NotificationDispatcher.get()
                 .dispatch(new NotificationContext(
-                        build, TaskListener.NULL, null, "wh", "branch=${SLACK_GIT_BRANCH}", "#000000", "retrybranch"));
+                        build, TaskListener.NULL, null, "wh", "branch=${SLACK_GIT_BRANCH}", "#000000", "retrybranch",
+                        EventType.START));
         SlackTestHelpers.awaitDispatch();
 
         assertEquals("initial attempt + one retry", 2, sender.calls.get());
