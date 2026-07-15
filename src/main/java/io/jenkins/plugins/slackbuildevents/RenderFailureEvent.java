@@ -12,7 +12,7 @@ import org.jenkinsci.plugins.tokenmacro.MacroEvaluationException;
  */
 final class RenderFailureEvent {
 
-    /** Cap on cause-chain traversal, shared by {@link #unwrap} and the dispatcher's interrupt-cause scan. */
+    /** Cap on {@link #unwrap}'s cause-chain traversal, bounding a pathological cause cycle. */
     static final int MAX_CAUSE_CHAIN_DEPTH = 16;
 
     /** {@code DEGRADED} or {@code FALLBACK} — retains the render severity distinction. */

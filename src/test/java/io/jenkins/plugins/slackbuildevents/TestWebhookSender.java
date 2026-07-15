@@ -22,6 +22,7 @@ class TestWebhookSender extends WebhookSender {
     final AtomicInteger calls = new AtomicInteger();
 
     private final Queue<Response> scripted = new ConcurrentLinkedQueue<>();
+    private volatile Throwable toThrow;
     private volatile int defaultStatus = 200;
     private volatile CountDownLatch gate;
     private volatile CountDownLatch entered; // counted down when send enters (just before it blocks)
@@ -60,11 +61,17 @@ class TestWebhookSender extends WebhookSender {
         this.completed = completed;
     }
 
+    /** Makes every subsequent {@link #send} record the call and then throw {@code t}. */
+    void throwOn(Throwable t) {
+        this.toThrow = t;
+    }
+
     @Override
     Response send(String url, String jsonBody) throws IOException, InterruptedException {
         calls.incrementAndGet();
         urls.add(url);
         bodies.add(jsonBody);
+        rethrowIfScripted();
         CountDownLatch e = entered;
         if (e != null) {
             e.countDown();
@@ -80,5 +87,25 @@ class TestWebhookSender extends WebhookSender {
             c.countDown();
         }
         return response;
+    }
+
+    private void rethrowIfScripted() throws IOException, InterruptedException {
+        Throwable t = toThrow;
+        if (t == null) {
+            return;
+        }
+        if (t instanceof IOException) {
+            throw (IOException) t;
+        }
+        if (t instanceof InterruptedException) {
+            throw (InterruptedException) t;
+        }
+        if (t instanceof RuntimeException) {
+            throw (RuntimeException) t;
+        }
+        if (t instanceof Error) {
+            throw (Error) t;
+        }
+        throw new IllegalArgumentException("send() cannot throw " + t.getClass().getName(), t);
     }
 }

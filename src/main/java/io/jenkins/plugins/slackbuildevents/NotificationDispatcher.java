@@ -201,10 +201,11 @@ public class NotificationDispatcher {
             }
             RenderOutcome outcome = render(context);
             if (outcome.category() == RenderCategory.ABORTED) {
-                // Interrupt surfaced during render. A genuine shutdown interrupt and a spurious wrapped
-                // one are indistinguishable from the cause chain, so surface a rate-limited WARNING (was a
-                // silent drop) rather than lose a possibly-genuine notification with no operator signal.
-                // Still send nothing; the throttle bounds any restart-time noise to one line per window.
+                // This thread was genuinely interrupted during render, and shutdownNow() is the only
+                // interrupt source this pool has — so the pool is tearing down and sending is pointless.
+                // The WARNING is unconditional: this line is the only trace explaining a missing
+                // notification, so it must be visible at the default log level. The signature carries
+                // only the credential id, so a restart costs one line per credential per window.
                 signalRenderAborted(context);
                 finish(op);
                 return;
@@ -295,7 +296,10 @@ public class NotificationDispatcher {
                 signature,
                 () -> new FailureMessage("Slack notification " + FailureCategory.RENDER_ABORTED + ": "
                         + describe(context)
-                        + " — render was interrupted; the notification was not sent."));
+                        + " — the dispatch thread was interrupted while rendering, so the notification was "
+                        + "not sent. Expected while Jenkins is shutting down or restarting; no action needed. "
+                        + "If this appears while Jenkins is running normally, something else is interrupting "
+                        + "the dispatch pool and should be investigated."));
     }
 
     private void signalHttpOutcome(@NonNull NotificationContext context, int statusCode) {
@@ -323,8 +327,11 @@ public class NotificationDispatcher {
 
     private void signalTransportFailure(
             @NonNull NotificationContext context, @NonNull Throwable t, @CheckForNull String webhookUrl) {
-        if (t instanceof InterruptedException || hasInterruptedCause(t)) {
+        if (isGenuinelyInterrupted(t)) {
             // Pool shutting down mid-send → restore the flag and stay QUIET (not a real transport error).
+            // send() surfaces a genuine interrupt as a raw InterruptedException, so this catches every
+            // real one; a throwable that merely carries an InterruptedException somewhere in its cause
+            // chain is a real failure and is signaled below.
             Thread.currentThread().interrupt();
             return;
         }
@@ -531,8 +538,11 @@ public class NotificationDispatcher {
      *       only the failed tokens survive as core-produced literals; the flat output is whole-escaped
      *       so a hostile macro-exception message cannot inject mrkdwn link markup.
      *   <li>Both passes throw → {@code FALLBACK}: a minimal, macro-independent marked message.
-     *   <li>An interrupt (raw or wrapped) surfaces on either pass → {@code ABORTED}: restore the flag,
-     *       send nothing, signal nothing (the pool is shutting down).
+     *   <li>This thread is genuinely interrupted on either pass → {@code ABORTED}: restore the flag and
+     *       send nothing (the pool is shutting down). An {@code InterruptedException} merely carried in a
+     *       pass's cause chain is NOT an abort — token-macro wraps whatever a macro throws, so a library
+     *       failure that happens to wrap one is indistinguishable from a genuine interrupt at this point,
+     *       and treating it as an abort silently drops a sendable notification.
      * </ul>
      *
      * <p>Package-private so a unit test can drive it directly and observe the worker-thread interrupt
@@ -577,34 +587,33 @@ public class NotificationDispatcher {
     }
 
     /**
-     * Detects an interrupt surfaced during render — either a raw {@link InterruptedException} (from
-     * {@code run.getEnvironment()} before parse) or one wrapped in a {@code MacroEvaluationException}
-     * (from a macro's {@code evaluate()}) — via the cause chain and the thread flag. When found,
-     * restores the interrupt flag so the dispatch pool's cooperative-cancellation contract holds, and
-     * signals an abort.
+     * Aborts the render when this thread is genuinely interrupted, restoring the interrupt flag so the
+     * dispatch pool's cooperative-cancellation contract holds.
      */
     private static boolean abortIfInterrupted(@NonNull Throwable pass) {
-        if (Thread.currentThread().isInterrupted() || hasInterruptedCause(pass)) {
+        if (isGenuinelyInterrupted(pass)) {
             Thread.currentThread().interrupt();
             return true;
         }
         return false;
     }
 
-    private static boolean hasInterruptedCause(@NonNull Throwable throwable) {
-        Throwable current = throwable;
-        int guard = 0;
-        while (current != null && guard++ < RenderFailureEvent.MAX_CAUSE_CHAIN_DEPTH) {
-            if (current instanceof InterruptedException) {
-                return true;
-            }
-            Throwable next = current.getCause();
-            if (next == current) {
-                break;
-            }
-            current = next;
-        }
-        return false;
+    /**
+     * The single interrupt test shared by the render and send paths: this thread's own interrupt state,
+     * or a throwable that <em>is</em> an {@link InterruptedException} (thrown before anything could wrap
+     * it, which clears the flag).
+     *
+     * <p>Deliberately does NOT walk the cause chain. token-macro wraps any throwable a macro raises in a
+     * {@code MacroEvaluationException}, and throwing an {@code InterruptedException} clears the thread's
+     * flag — so a genuine shutdown interrupt raised inside a macro and an unrelated library failure that
+     * merely carries an {@code InterruptedException} arrive here byte-identical. Since the two cannot be
+     * told apart, classifying on the cause chain would abort the common case (an unrelated wrapped
+     * interrupt) and silently lose a notification that could still have been delivered. Missing the rare
+     * genuine case instead costs nothing: it is handled as an ordinary render failure and best-effort
+     * sent, and the pool reclaims the worker by its run state regardless of the flag.
+     */
+    private static boolean isGenuinelyInterrupted(@NonNull Throwable t) {
+        return Thread.currentThread().isInterrupted() || t instanceof InterruptedException;
     }
 
     @NonNull
@@ -781,6 +790,13 @@ public class NotificationDispatcher {
         shutdown(ex);
     }
 
+    /**
+     * Graceful drain, then {@code shutdownNow()}. Nothing waits on the workers after {@code shutdownNow()}
+     * — no second {@code awaitTermination}, and the pool threads are daemons — which is what makes it safe
+     * for the render path to classify a genuine interrupt raised inside a macro as an ordinary failure and
+     * leave the flag unrestored: the pool reclaims workers by its own run state, so an unrestored interrupt
+     * has no observable effect here. Adding a post-{@code shutdownNow()} await would break that.
+     */
     private static void shutdown(@CheckForNull ExecutorService service) {
         if (service == null) {
             return;

@@ -51,6 +51,13 @@ final class LogCapture implements AutoCloseable {
                 .count();
     }
 
+    /** Count of records at any level whose message contains {@code needle}. */
+    long recordsContaining(String needle) {
+        return records.stream()
+                .filter(r -> String.valueOf(r.getMessage()).contains(needle))
+                .count();
+    }
+
     /** Total count of WARNING-or-higher records. */
     long warningCount() {
         return records.stream()
