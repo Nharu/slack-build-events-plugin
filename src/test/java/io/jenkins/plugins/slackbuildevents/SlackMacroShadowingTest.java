@@ -19,13 +19,13 @@ import org.jvnet.hudson.test.JenkinsRule;
 
 /**
  * {@code ${SLACK_*}} macro shadowing (the default-template escaping bypass) is structurally closed by
- * candidate C.
+ * the macro-only {@code expand()} render path.
  *
  * <p>A build parameter named exactly {@code SLACK_GIT_BRANCH} let the old {@code expandAll()} env
  * pre-pass substitute the raw, unescaped parameter value for {@code ${SLACK_GIT_BRANCH}} before the
- * plugin's escaping macro ever ran. Under the macro-only {@code expand()} the token is always handled
- * by the plugin macro, so the same-named parameter has no effect: the hostile build renders exactly
- * like a benign build with no such parameter.
+ * plugin's escaping macro ever ran. Under the macro-only {@code expand()} render path the token is
+ * always handled by the plugin macro, so the same-named parameter has no effect: the hostile build
+ * renders exactly like a benign build with no such parameter.
  */
 public class SlackMacroShadowingTest {
 
@@ -48,7 +48,7 @@ public class SlackMacroShadowingTest {
         String hostileExpand = TokenMacro.expand(hostile, null, TaskListener.NULL, template);
         String benignExpand = TokenMacro.expand(benign, null, TaskListener.NULL, template);
 
-        // Candidate C: the same-named parameter has no effect — hostile renders like benign, and the
+        // Macro-only expand(): the same-named parameter has no effect — hostile renders like benign, and the
         // raw link markup never reaches the message.
         assertThat(hostileExpand, is(benignExpand));
         assertThat(hostileExpand, not(containsString("<https")));

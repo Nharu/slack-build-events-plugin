@@ -12,7 +12,7 @@ import org.jvnet.hudson.test.JenkinsRule;
 /**
  * Golden parity: the six built-in default templates render byte-identically under the macro-only
  * {@code expand()} the render path now uses and the previous {@code expandAll()}. This pins that
- * switching engines (candidate C) does not change any default message — the defaults reference only
+ * switching to the macro-only expand() render path does not change any default message — the defaults reference only
  * registered macros ({@code ${SLACK_*}}, {@code ${ENV,var="..."}}), which both engines evaluate the
  * same way.
  */
