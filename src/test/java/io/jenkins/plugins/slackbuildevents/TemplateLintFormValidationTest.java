@@ -39,4 +39,18 @@ public class TemplateLintFormValidationTest {
         assertThat(rendered, containsString("SLACK_GIT_BRANCH"));
         assertThat(rendered, containsString("DEPLOY_TARGET"));
     }
+
+    @Test
+    public void aggregatesThreeOrMoreParts() {
+        // tier-1 (GIT_BRANCH, has equivalent) + no-equivalent (CHANGE_TITLE) + tier-2 (DEPLOY_TARGET)
+        // + a plain raw-fallback (FOO) — several parts combined into one WARNING that surfaces each.
+        FormValidation fv = TemplateLint.check(
+                "${ENV,var=\"GIT_BRANCH\"} ${ENV,var=\"CHANGE_TITLE\"} ${ENV,var=\"DEPLOY_TARGET\"} ${FOO}");
+        assertEquals(FormValidation.Kind.WARNING, fv.kind);
+        String rendered = fv.renderHtml();
+        assertThat(rendered, containsString("SLACK_GIT_BRANCH"));
+        assertThat(rendered, containsString("CHANGE_TITLE"));
+        assertThat(rendered, containsString("DEPLOY_TARGET"));
+        assertThat(rendered, containsString("FOO"));
+    }
 }

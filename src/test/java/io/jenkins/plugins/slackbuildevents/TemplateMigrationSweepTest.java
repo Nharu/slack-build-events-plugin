@@ -20,7 +20,7 @@ import org.junit.Test;
 import org.jvnet.hudson.test.JenkinsRule;
 
 /**
- * The migration matcher (which plain references will raw-fall-back under candidate C), the one-time
+ * The migration matcher (which plain references will raw-fall-back under the macro-only expand() render
  * startup sweep that names them, and the render-path WARNING that fires once per distinct template.
  */
 public class TemplateMigrationSweepTest {
@@ -77,7 +77,7 @@ public class TemplateMigrationSweepTest {
     @Test
     public void renderRawFallbackWarnsOncePerTemplate() throws Exception {
         NotificationRule rule = SlackTestHelpers.rule("dedup", List.of("success"));
-        rule.setSuccessTemplate("deploy=${DEPLOY_TARGET}"); // unregistered → raw fallback under candidate C
+        rule.setSuccessTemplate("deploy=${DEPLOY_TARGET}"); // unregistered → raw fallback via macro-only expand()
         SlackTestHelpers.config().setRules(List.of(rule));
 
         List<LogRecord> records = Collections.synchronizedList(new ArrayList<>());
@@ -96,7 +96,50 @@ public class TemplateMigrationSweepTest {
                 .filter(r -> r.getLevel() == Level.WARNING)
                 .filter(r -> r.getMessage() != null && r.getMessage().contains("unexpanded"))
                 .count();
-        // Two builds render the same raw-fallback template, but the WARNING is deduped by template hash.
+        // Two builds render the same raw-fallback template, but the WARNING is deduped per distinct template.
+        assertEquals(1, warnings);
+    }
+
+    @Test
+    public void matcherIgnoresUnterminatedDelimiter() {
+        // Current behavior: an unterminated "${" is not treated as a token, so the sweep does not flag it.
+        assertThat(TemplateLint.rawFallbackNames("x=${UNTERMINATED and more"), is(empty()));
+    }
+
+    @Test
+    public void sweepWithCleanConfigLogsNothing() {
+        SlackTestHelpers.config().setDefaultSuccessTemplate("all good ${SLACK_BUILD_URL}");
+
+        List<LogRecord> records = Collections.synchronizedList(new ArrayList<>());
+        Handler handler = attach(TemplateMigrationSweep.class.getName(), records);
+        try {
+            TemplateMigrationSweep.warnOnRawFallbackTemplates();
+        } finally {
+            Logger.getLogger(TemplateMigrationSweep.class.getName()).removeHandler(handler);
+        }
+
+        long warnings = records.stream().filter(r -> r.getLevel() == Level.WARNING).count();
+        assertEquals(0, warnings);
+    }
+
+    @Test
+    public void sweepScansPerRuleTemplates() {
+        NotificationRule rule = SlackTestHelpers.rule("app", List.of("failure"));
+        rule.setFailureTemplate("broke ${DEPLOY_TARGET}"); // per-rule override, unregistered name
+        SlackTestHelpers.config().setRules(List.of(rule));
+
+        List<LogRecord> records = Collections.synchronizedList(new ArrayList<>());
+        Handler handler = attach(TemplateMigrationSweep.class.getName(), records);
+        try {
+            TemplateMigrationSweep.warnOnRawFallbackTemplates();
+        } finally {
+            Logger.getLogger(TemplateMigrationSweep.class.getName()).removeHandler(handler);
+        }
+
+        long warnings = records.stream()
+                .filter(r -> r.getLevel() == Level.WARNING)
+                .filter(r -> r.getMessage() != null && r.getMessage().contains("DEPLOY_TARGET"))
+                .count();
         assertEquals(1, warnings);
     }
 
