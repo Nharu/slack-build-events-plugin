@@ -1,0 +1,26 @@
+<div>
+  Optional global default template for the <b>Build Aborted</b> event (token-macro syntax).
+  Leave blank to use the built-in default. A per-rule override, when set, wins over this.
+
+  <p>
+    Prefer the plugin's escaped <code>${SLACK_*}</code> macros — their values are escaped for
+    Slack mrkdwn, so a crafted branch/commit value cannot inject <code>&lt;url|label&gt;</code>
+    link markup: <code>${SLACK_GIT_BRANCH}</code>, <code>${SLACK_GIT_COMMIT}</code>,
+    <code>${SLACK_DEPLOYER}</code>, <code>${SLACK_DURATION}</code>,
+    <code>${SLACK_BUILD_URL}</code>.
+  </p>
+
+  <p>
+    Avoid raw <code>${ENV,var="..."}</code> for SCM/PR-derived values (e.g.
+    <code>GIT_BRANCH</code>, <code>CHANGE_TITLE</code>): those are inserted <b>without</b> Slack
+    escaping and can carry injected link markup or leak sensitive build variables. A plain
+    <code>${VAR}</code> / <code>$VAR</code> that is not a recognized macro does not expand — the
+    whole message is then sent as raw, unexpanded text.
+  </p>
+
+  <p>
+    Note: this hint only checks the <code>${ENV,var="…"}</code> form. Other registered macros can
+    also emit SCM/PR-derived values that need Slack escaping, so a template can still carry an
+    unescaped value that this hint does not flag.
+  </p>
+</div>

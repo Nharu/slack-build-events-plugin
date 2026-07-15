@@ -10,6 +10,7 @@ import hudson.Extension;
 import hudson.ExtensionList;
 import hudson.init.Terminator;
 import hudson.security.ACL;
+import java.io.IOException;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
@@ -34,6 +35,7 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 import jenkins.model.Jenkins;
 import org.jenkinsci.plugins.plaincredentials.StringCredentials;
+import org.jenkinsci.plugins.tokenmacro.MacroEvaluationException;
 import org.jenkinsci.plugins.tokenmacro.TokenMacro;
 
 /**
@@ -70,6 +72,8 @@ public class NotificationDispatcher {
     private final AtomicInteger pendingRetries = new AtomicInteger();
     private final AtomicLong droppedCount = new AtomicLong();
     private final Set<CompletableFuture<Void>> inFlight = ConcurrentHashMap.newKeySet();
+    /** Distinct template texts already warned about on raw fallback, so the WARNING fires once per template. */
+    private final Set<String> loggedFallbackTemplates = ConcurrentHashMap.newKeySet();
 
     @NonNull
     static NotificationDispatcher get() {
@@ -95,6 +99,7 @@ public class NotificationDispatcher {
             this.pendingRetries.set(0);
             this.droppedCount.set(0);
             this.inFlight.clear();
+            this.loggedFallbackTemplates.clear();
         }
     }
 
@@ -264,21 +269,103 @@ public class NotificationDispatcher {
     }
 
     @NonNull
-    private String render(@NonNull NotificationContext context) {
+    String render(@NonNull NotificationContext context) {
         // Install the start-time branch snapshot for the duration of this render only.
         GitMacroSupport.setStartBranchHint(context.branchHint());
         try {
-            // Single pass: substituted values are not re-scanned, so user-controlled env
-            // cannot inject further macros.
-            return TokenMacro.expandAll(context.run(), null, context.listener(), context.template());
+            // Macro-only expansion: expand() evaluates registered macros in a single pass and does NOT
+            // run token-macro's leading plain-env substitution pass (that is expandAll's behavior). So a
+            // user-controlled env value is never spliced into the template ahead of macro evaluation, and
+            // an unrecognized ${VAR}/$VAR raises MacroEvaluationException instead of being substituted
+            // raw — caught below and handled as a whole-template raw fallback.
+            return TokenMacro.expand(context.run(), null, context.listener(), context.template());
+        } catch (MacroEvaluationException e) {
+            // token-macro wraps whatever a macro throws — a checked IOException/InterruptedException or
+            // an unchecked RuntimeException — into a MacroEvaluationException whose cause is the original
+            // (its internal token processing catches Throwable and rethrows it wrapped). Unwrap so an I/O
+            // error, an interruption, or an unexpected macro crash are each handled the same as if they
+            // had propagated directly, instead of all looking like a template-authoring mistake.
+            Throwable cause = e.getCause();
+            if (cause instanceof InterruptedException) {
+                return interruptedFallback(context, cause);
+            }
+            if (cause instanceof IOException) {
+                return ioErrorFallback(context, cause);
+            }
+            if (cause == null || cause instanceof MacroEvaluationException) {
+                // A ${VAR}/$VAR that is not a recognized macro (or a nested macro-evaluation failure):
+                // a template-authoring problem. The whole message falls back to raw text. Warn once per
+                // distinct template so an unattended pipeline can observe it without flooding every build.
+                warnRawFallbackOncePerTemplate(context.template(), MACRO_FALLBACK_MESSAGE, e);
+            } else {
+                // A macro threw an unexpected unchecked exception; absorb it as a raw fallback so a single
+                // misbehaving macro never breaks a notification.
+                warnRawFallbackOncePerTemplate(context.template(), UNEXPECTED_FALLBACK_MESSAGE, e);
+            }
+            return context.template();
+        } catch (IOException e) {
+            // A framework-level I/O error outside a macro (expand() declares it). Same handling as an
+            // unwrapped macro I/O error above.
+            return ioErrorFallback(context, e);
+        } catch (InterruptedException e) {
+            // A framework-level interruption outside a macro. Same handling as the unwrapped case above.
+            return interruptedFallback(context, e);
         } catch (Exception e) {
-            LOGGER.log(Level.FINE, "Template expansion failed; sending raw template", e);
+            // Fail-safe sink for anything thrown outside token processing (e.g. an unchecked exception
+            // from render setup). Absorb it as a raw fallback like the cases above. Error (e.g.
+            // OutOfMemoryError) is intentionally not caught and propagates.
+            warnRawFallbackOncePerTemplate(context.template(), UNEXPECTED_FALLBACK_MESSAGE, e);
             return context.template();
         } finally {
             // Clear on EVERY exit path (including the raw-template fallback above) so the hint never
             // leaks to the next notification rendered on this pooled worker or across a retry hand-off.
             GitMacroSupport.clearStartBranchHint();
         }
+    }
+
+    private static final String MACRO_FALLBACK_MESSAGE =
+            "Slack template expansion failed; sending the template unexpanded (raw). A ${VAR}/$VAR "
+                    + "reference that is not a recognized macro stops expansion; use a ${SLACK_*} macro or "
+                    + "${ENV,var=\"...\"} instead.";
+
+    private static final String UNEXPECTED_FALLBACK_MESSAGE =
+            "Slack template expansion failed unexpectedly; sending the template unexpanded (raw).";
+
+    /**
+     * Logs a raw-fallback WARNING at most once per distinct template text, so an unattended pipeline can
+     * observe the fallback without the log flooding on every build. Shared by the macro-evaluation and
+     * the unchecked fail-safe catch paths; the I/O and interrupt paths deliberately do not dedup.
+     */
+    private void warnRawFallbackOncePerTemplate(String template, String message, Throwable cause) {
+        if (loggedFallbackTemplates.add(template)) {
+            LOGGER.log(Level.WARNING, message, cause);
+        }
+    }
+
+    /**
+     * Raw fallback for an I/O error reading the build environment — an operational problem, not a
+     * template mistake, so it warns every time (dedup is for the template-authoring case). The rendered
+     * output is deliberately never logged, as it could carry an expanded secret value.
+     */
+    private String ioErrorFallback(NotificationContext context, Throwable cause) {
+        LOGGER.log(
+                Level.WARNING,
+                "Slack template expansion hit an I/O error reading the build environment; sending the "
+                        + "template unexpanded (raw).",
+                cause);
+        return context.template();
+    }
+
+    /**
+     * Raw fallback for an interruption: restores the thread's interrupt flag and falls back to raw. This
+     * is normal during shutdownNow() teardown, so it stays at FINE to avoid false-alarm noise. It only
+     * preserves the flag; the in-progress send is not aborted (render() couples producing the text and
+     * sending it).
+     */
+    private String interruptedFallback(NotificationContext context, Throwable cause) {
+        Thread.currentThread().interrupt();
+        LOGGER.log(Level.FINE, "Slack template expansion interrupted; sending the template unexpanded (raw).", cause);
+        return context.template();
     }
 
     @CheckForNull
