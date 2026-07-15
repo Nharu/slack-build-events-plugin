@@ -201,11 +201,15 @@ public class NotificationDispatcher {
             }
             RenderOutcome outcome = render(context);
             if (outcome.category() == RenderCategory.ABORTED) {
-                // Interrupt surfaced during render. A genuine shutdown interrupt and a spurious wrapped
-                // one are indistinguishable from the cause chain, so surface a rate-limited WARNING (was a
-                // silent drop) rather than lose a possibly-genuine notification with no operator signal.
-                // Still send nothing; the throttle bounds any restart-time noise to one line per window.
-                signalRenderAborted(context);
+                // Interrupt surfaced during render; send nothing either way. If the pool is still running,
+                // this is a genuine interrupt on a live worker → surface a rate-limited WARNING rather than
+                // lose a possibly-genuine notification with no operator signal. If the pool is shutting down
+                // (the executor has been torn down) stay QUIET, matching the transport sibling, so a
+                // controller restart does not emit false alarms. The throttle bounds running-pool noise to
+                // one line per window.
+                if (executor != null) {
+                    signalRenderAborted(context);
+                }
                 finish(op);
                 return;
             }
