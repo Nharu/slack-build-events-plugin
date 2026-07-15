@@ -352,7 +352,7 @@ public class NotificationDispatcher {
                         + ": dispatch queue saturated; notification dropped. The dispatch pool is at capacity."));
     }
 
-    private static FailureMessage renderMessage(@NonNull RenderFailureEvent event) {
+    static FailureMessage renderMessage(@NonNull RenderFailureEvent event) {
         FailureCategory category = categoryOf(event.category);
         String guidance = (event.category == RenderCategory.DEGRADED)
                 ? "Some tokens could not be expanded; the notification was sent with those tokens left as literals."
@@ -361,10 +361,12 @@ public class NotificationDispatcher {
         String headline = "Slack notification " + category + ": "
                 + header(event.jobFullName, event.buildNumber, event.event, event.webhookCredentialId)
                 + (event.failedMacroHint != null ? " token '" + event.failedMacroHint + "'" : "")
-                + " — " + scrubForLog(summarize(event.rootCause)) + ". " + guidance;
-        // Full stack goes in the detail, below the headline, so a piggybacked suppression count stays on
-        // line 1. Rate-limited to one per window.
-        return new FailureMessage(headline, stackTraceOf(event.cause));
+                + " — " + summarize(event.rootCause) + ". " + guidance;
+        // Scrub the whole assembled single-line headline once: even if the hint's shape check were bypassed,
+        // the headline still cannot forge a log line. The multi-line stack-trace detail is deliberately NOT
+        // scrubbed (that would destroy diagnostics); it goes below the headline so a piggybacked suppression
+        // count stays on line 1. Rate-limited to one per window.
+        return new FailureMessage(scrubForLog(headline), stackTraceOf(event.cause));
     }
 
     @NonNull
@@ -633,26 +635,38 @@ public class NotificationDispatcher {
     }
 
     /**
-     * Best-effort extraction of the failing token's name from the strict-pass exception message
-     * (e.g. token-macro's {@code Unrecognized macro 'NAME' in '...'}). Returns {@code null} when no
-     * quoted name is present; the signature key falls back to the template digest, so this is never
-     * load-bearing for signature stability.
+     * Extracts the failing token's name from token-macro's canonical strict-pass message
+     * {@code Unrecognized macro 'NAME' in '...'}. Accepts NAME only from that exact prefix and only when it
+     * is an allowlisted identifier ({@code [A-Za-z0-9_]}, length &lt;= 64); anything else — a different
+     * message, an empty name, whitespace/control characters, or an over-long span — yields {@code null}. A
+     * registered macro that echoes untrusted input into its exception message therefore cannot forge a log
+     * line or fragment the suppression signature. The hint is never load-bearing: a null falls back to the
+     * template digest. Package-private for direct unit testing.
      */
     @CheckForNull
-    private static String parseFailedMacroHint(@NonNull Throwable cause) {
+    static String parseFailedMacroHint(@NonNull Throwable cause) {
         String message = cause.getMessage();
-        if (message == null) {
+        String prefix = "Unrecognized macro '";
+        if (message == null || !message.startsWith(prefix)) {
             return null;
         }
-        int open = message.indexOf('\'');
-        if (open < 0) {
+        int close = message.indexOf('\'', prefix.length());
+        if (close < 0) {
             return null;
         }
-        int close = message.indexOf('\'', open + 1);
-        if (close <= open + 1) {
+        String name = message.substring(prefix.length(), close);
+        if (name.isEmpty() || name.length() > 64) {
             return null;
         }
-        return message.substring(open + 1, close);
+        for (int i = 0; i < name.length(); i++) {
+            char c = name.charAt(i);
+            boolean identifierChar =
+                    (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_';
+            if (!identifierChar) {
+                return null;
+            }
+        }
+        return name;
     }
 
     /**
