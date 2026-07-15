@@ -24,6 +24,9 @@ class WebhookSender {
     private final HttpClient client;
 
     WebhookSender() {
+        // Redirect guard: rely on the default followRedirects policy of NEVER. Do NOT add
+        // .followRedirects(NORMAL/ALWAYS) — a 30x could redirect a send-time-validated host to
+        // an internal one, bypassing the webhook host allowlist (SSRF hardening).
         this(HttpClient.newBuilder().connectTimeout(TIMEOUT).build());
     }
 
@@ -34,11 +37,17 @@ class WebhookSender {
     /** Sends the payload and returns the HTTP status with any {@code Retry-After} header. */
     @NonNull
     Response send(@NonNull String url, @NonNull String jsonBody) throws IOException, InterruptedException {
-        HttpRequest request = HttpRequest.newBuilder(URI.create(url))
-                .timeout(TIMEOUT)
-                .header("Content-Type", "application/json; charset=utf-8")
-                .POST(HttpRequest.BodyPublishers.ofString(jsonBody, StandardCharsets.UTF_8))
-                .build();
+        HttpRequest request;
+        try {
+            request = HttpRequest.newBuilder(URI.create(url))
+                    .timeout(TIMEOUT)
+                    .header("Content-Type", "application/json; charset=utf-8")
+                    .POST(HttpRequest.BodyPublishers.ofString(jsonBody, StandardCharsets.UTF_8))
+                    .build();
+        } catch (IllegalArgumentException e) {
+            // The IAE message embeds the secret webhook URL; never propagate its message or cause.
+            throw new IOException("Webhook URL is malformed"); // no cause, no URL
+        }
         HttpResponse<Void> response = client.send(request, HttpResponse.BodyHandlers.discarding());
         String retryAfter = response.headers().firstValue("Retry-After").orElse(null);
         return new Response(response.statusCode(), retryAfter);

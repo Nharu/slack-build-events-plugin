@@ -23,6 +23,8 @@ disappear entirely — no registration guard code is needed.
 - **Asynchronous, best-effort** dispatch — Slack latency/outages never block builds.
 - **Non-blocking 429 retry** honoring `Retry-After`.
 - **JCasC-compatible** — every field round-trips; secrets are referenced by credential id only.
+- **Opt-in SSRF / ReDoS hardening** — a send-time webhook host allowlist + https-only toggle,
+  and a backtracking step budget on rule-pattern matching (both off by default).
 - Built-in default templates are **language-neutral**; organization-specific wording
   is injected through configuration (global/rule template overrides), never the plugin source.
 
@@ -35,6 +37,10 @@ Configure under **Manage Jenkins → System → Slack Templated Notifier** (admi
   `job.getFullName()`), per-event toggles, and optional channel / webhook
   credential / per-event template overrides.
 - **Max retries on 429** — `0`–`5` (default `1`).
+- **Webhook host allowlist** — optional; when set, a webhook is only sent if its host
+  suffix-matches an entry. Empty (default) means unrestricted.
+- **Require HTTPS webhook URLs** — optional; when on, plain-`http` webhooks are blocked
+  at send time. Off (default) so internal HTTP receivers keep working.
 
 > **Note — first-match is job-level, not event-level:** the first rule whose regex matches a job
 > governs that job entirely. Only that rule's per-event toggles are consulted; once a job matches a
@@ -58,6 +64,29 @@ webhook per channel and select it per rule via the webhook credential override
 (channel ↔ webhook is 1:1). The payload `channel` / global default channel is kept
 only as a best-effort hint for legacy custom-integration webhooks.
 
+### Security hardening (opt-in)
+
+Both webhook configuration and rule patterns require administrator rights, so these controls
+are **defense-in-depth against an already-trusted admin**, not a boundary against untrusted
+users. All are off by default, preserving historical behavior (including self-hosted
+Slack-compatible receivers over internal HTTP).
+
+- **Webhook host allowlist** — enforced at send time. A host is allowed if it equals an entry
+  or ends with `.` + the entry, so `slack.com` matches `hooks.slack.com` but not
+  `evilslack.com`. Comparison is case-insensitive and IDN-normalized; entries are stored
+  verbatim. Combined with **Require HTTPS** using AND.
+- **ReDoS step budget** — each rule-pattern match is bounded by a backtracking step budget; a
+  pathological pattern is aborted (treated as no-match) instead of pinning the notification
+  thread, and later rules are still evaluated. The pattern editor also runs a config-time
+  self-check that warns on catastrophic patterns.
+
+Known limitations (accepted residual risk at this threat level):
+
+- Allowlist IP-literal entries are plain suffix matches — **no CIDR** (`10.0.0.0` ≠ `10.0.0.1`);
+  IPv6 literals must be entered in the bracketed form `URI.getHost()` returns (e.g. `[::1]`).
+- The allowlist checks the resolved host name; a name re-resolving to an internal IP after the
+  check (DNS rebinding) is not defended against.
+
 ### JCasC sample (`jenkins.yaml`)
 
 ```yaml
@@ -65,6 +94,9 @@ unclassified:
   slackTemplatedNotifier:
     defaultChannel: "#jenkins"
     defaultWebhookCredentialId: "slack-webhook-url"
+    httpsOnly: true
+    webhookHostAllowlist:
+      - "hooks.slack.com"
     rules:
       - jobNamePattern: "dev/server.*"
         notifyStart: true

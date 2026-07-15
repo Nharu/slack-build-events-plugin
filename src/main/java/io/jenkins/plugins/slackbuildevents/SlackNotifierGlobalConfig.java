@@ -37,6 +37,17 @@ public final class SlackNotifierGlobalConfig extends GlobalConfiguration {
     private List<NotificationRule> rules = new ArrayList<>();
     private int maxRetriesOn429 = DEFAULT_MAX_RETRIES;
 
+    /**
+     * Opt-in SSRF hardening. When non-empty, a webhook host must suffix-match one of these
+     * entries at send time or the POST is blocked; empty (default) means unrestricted so the
+     * plugin's historical behavior is preserved. Stored verbatim (case/IDN normalization happens
+     * only at compare time) so JCasC export equals import.
+     */
+    private List<String> webhookHostAllowlist = new ArrayList<>();
+
+    /** Opt-in: when true, only {@code https} webhook URLs are allowed at send time. Default false. */
+    private boolean httpsOnly;
+
     private String defaultStartTemplate;
     private String defaultSuccessTemplate;
     private String defaultFailureTemplate;
@@ -91,6 +102,26 @@ public final class SlackNotifierGlobalConfig extends GlobalConfiguration {
     @DataBoundSetter
     public void setMaxRetriesOn429(int maxRetriesOn429) {
         this.maxRetriesOn429 = clamp(maxRetriesOn429);
+    }
+
+    @NonNull
+    public List<String> getWebhookHostAllowlist() {
+        return Collections.unmodifiableList(webhookHostAllowlist);
+    }
+
+    @DataBoundSetter
+    public void setWebhookHostAllowlist(List<String> webhookHostAllowlist) {
+        this.webhookHostAllowlist =
+                webhookHostAllowlist == null ? new ArrayList<>() : new ArrayList<>(webhookHostAllowlist);
+    }
+
+    public boolean isHttpsOnly() {
+        return httpsOnly;
+    }
+
+    @DataBoundSetter
+    public void setHttpsOnly(boolean httpsOnly) {
+        this.httpsOnly = httpsOnly;
     }
 
     @CheckForNull
@@ -268,6 +299,12 @@ public final class SlackNotifierGlobalConfig extends GlobalConfiguration {
     public ListBoxModel doFillDefaultWebhookCredentialIdItems(
             @QueryParameter String defaultWebhookCredentialId) {
         return WebhookCredentials.fillItems(defaultWebhookCredentialId);
+    }
+
+    @POST
+    public FormValidation doCheckDefaultWebhookCredentialId(@QueryParameter String value) {
+        Jenkins.get().checkPermission(Jenkins.ADMINISTER);
+        return WebhookCredentials.checkUrlPolicy(value);
     }
 
     private static int clamp(int value) {
