@@ -11,8 +11,8 @@ package io.jenkins.plugins.slackbuildevents;
  *       body where only the failed tokens survive as literals. Lower-severity signal.
  *   <li>{@code FALLBACK} — both passes failed; send a minimal, macro-independent marked message
  *       (never the raw template). Higher-severity signal.
- *   <li>{@code ABORTED} — an interrupt surfaced during render (pool shutting down); send nothing
- *       and raise no signal.
+ *   <li>{@code ABORTED} — an interrupt surfaced during render; send nothing. On a running pool this
+ *       raises a rate-limited RENDER_ABORTED WARNING; while the pool is shutting down it stays silent.
  * </ul>
  */
 enum RenderCategory {

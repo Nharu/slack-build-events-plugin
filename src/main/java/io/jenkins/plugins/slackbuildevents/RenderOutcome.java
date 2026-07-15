@@ -12,7 +12,7 @@ import edu.umd.cs.findbugs.annotations.NonNull;
  * <p>Expansion is not all-or-nothing: every resolvable token is always resolved, and only the tokens
  * that failed survive as literals. A template consisting of a single unresolved token can therefore
  * produce a DEGRADED body that coincides with the template text — but no resolvable token is ever
- * dropped, and every DEGRADED/FALLBACK render emits a WARNING.
+ * dropped, and every DEGRADED/FALLBACK render signals a rate-limited WARNING.
  */
 final class RenderOutcome {
 

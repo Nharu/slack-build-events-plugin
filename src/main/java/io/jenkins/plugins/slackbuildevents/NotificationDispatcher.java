@@ -537,8 +537,9 @@ public class NotificationDispatcher {
      *       only the failed tokens survive as core-produced literals; the flat output is whole-escaped
      *       so a hostile macro-exception message cannot inject mrkdwn link markup.
      *   <li>Both passes throw → {@code FALLBACK}: a minimal, macro-independent marked message.
-     *   <li>An interrupt (raw or wrapped) surfaces on either pass → {@code ABORTED}: restore the flag,
-     *       send nothing, signal nothing (the pool is shutting down).
+     *   <li>An interrupt (raw or wrapped) surfaces on either pass → {@code ABORTED}: restore the flag and
+     *       send nothing. The caller raises a rate-limited RENDER_ABORTED WARNING on a running pool, and
+     *       stays silent while the pool is shutting down.
      * </ul>
      *
      * <p>Package-private so a unit test can drive it directly and observe the worker-thread interrupt
