@@ -5,6 +5,7 @@ import static org.junit.Assert.assertEquals;
 import hudson.FilePath;
 import hudson.model.AbstractBuild;
 import hudson.model.FreeStyleBuild;
+import hudson.model.FreeStyleProject;
 import hudson.model.Run;
 import hudson.model.TaskListener;
 import java.io.IOException;
@@ -207,9 +208,81 @@ public class DispatchVisibilityTest {
     }
 
     @Test
+    public void renderAbortedLogsWarning() throws Exception {
+        // A running pool: a genuine interrupt during render surfaces a rate-limited RENDER_ABORTED WARNING
+        // (gate-independent — the executor is non-null while the pool is alive).
+        TestWebhookSender sender = new TestWebhookSender();
+        installWithCredential(sender);
+        NotificationRule rule = SlackTestHelpers.rule("myjob", List.of("success"));
+        rule.setSuccessTemplate("x=${SLACK_TEST_INTERRUPT}");
+        SlackTestHelpers.config().setRules(List.of(rule));
+
+        try (LogCapture logs = new LogCapture(FailureLogThrottle.class)) {
+            j.buildAndAssertSuccess(j.createFreeStyleProject("myjob"));
+            SlackTestHelpers.awaitDispatch();
+            assertEquals(1, logs.warningsContaining("RENDER_ABORTED"));
+            assertEquals(0, sender.calls.get()); // an aborted render sends nothing
+        }
+    }
+
+    @Test
+    public void twoDistinctUnknownMacrosYieldTwoRenderDegradedSignatures() throws Exception {
+        // parseFailedMacroHint reaches the WARNING body (canonical `Unrecognized macro 'NAME'`), and two
+        // distinct failing tokens do not collapse into one suppression signature.
+        TestWebhookSender sender = new TestWebhookSender();
+        installWithCredential(sender);
+        NotificationRule ruleA = SlackTestHelpers.rule("joba", List.of("success"));
+        ruleA.setSuccessTemplate("a=${DEFINITELY_UNKNOWN_ONE}");
+        NotificationRule ruleB = SlackTestHelpers.rule("jobb", List.of("success"));
+        ruleB.setSuccessTemplate("b=${DEFINITELY_UNKNOWN_TWO}");
+        SlackTestHelpers.config().setRules(List.of(ruleA, ruleB));
+
+        try (LogCapture logs = new LogCapture(FailureLogThrottle.class)) {
+            j.buildAndAssertSuccess(j.createFreeStyleProject("joba"));
+            j.buildAndAssertSuccess(j.createFreeStyleProject("jobb"));
+            SlackTestHelpers.awaitDispatch();
+            assertEquals(2, logs.warningsContaining("RENDER_DEGRADED"));
+            assertEquals(1, logs.warningsContaining("token 'DEFINITELY_UNKNOWN_ONE'"));
+            assertEquals(1, logs.warningsContaining("token 'DEFINITELY_UNKNOWN_TWO'"));
+        }
+    }
+
+    @Test
+    public void jvmErrorLandsInUnexpectedAndReplacesWorker() throws Exception {
+        // The first send throws a JVM Error (not a RuntimeException) → UNEXPECTED_ERROR (never a network
+        // lie), then the pool replaces the crashed worker so a later notification still sends.
+        AtomicInteger sendCalls = new AtomicInteger();
+        WebhookSender erroringThenOk = new WebhookSender() {
+            @Override
+            Response send(String url, String jsonBody) {
+                if (sendCalls.getAndIncrement() == 0) {
+                    throw new AssertionError("simulated JVM error in send");
+                }
+                return TestWebhookSender.status(200);
+            }
+        };
+        installWithCredential(erroringThenOk);
+        SlackTestHelpers.config().setRules(List.of(SlackTestHelpers.rule("myjob", List.of("success"))));
+        FreeStyleProject p = j.createFreeStyleProject("myjob");
+
+        try (LogCapture logs = new LogCapture(FailureLogThrottle.class)) {
+            j.buildAndAssertSuccess(p); // dispatch #1 → Error → UNEXPECTED_ERROR, worker rethrows the Error
+            SlackTestHelpers.awaitDispatch();
+            assertEquals(1, logs.warningsContaining("UNEXPECTED_ERROR"));
+
+            j.buildAndAssertSuccess(p); // dispatch #2 → the pool replaced the worker, so this still sends
+            SlackTestHelpers.awaitDispatch();
+            assertEquals("pool survived and sent again", 2, sendCalls.get());
+        }
+    }
+
+    @Test
     public void everyFailureCategoryIsAccountedFor() {
-        // Tripwire: a new FailureCategory added without updating this set (and giving it visibility
-        // coverage) fails the build, so no dispatch-failure class slips in unsignaled.
+        // Tripwire — narrow by design: this asserts ONLY that the asserted set stays in lockstep with the
+        // FailureCategory enum (adding a category without updating this set fails the build). It does NOT
+        // verify that each category is wired to a signal; per-category signal wiring is covered by the
+        // individual driving tests (e.g. renderAbortedLogsWarning, jvmErrorLandsInUnexpectedAndReplacesWorker,
+        // httpClientErrorLogsWarning). Strengthening this to also assert wiring is optional, not required.
         EnumSet<FailureCategory> asserted = EnumSet.of(
                 FailureCategory.CREDENTIAL_MISSING,
                 FailureCategory.RENDER_DEGRADED,
@@ -260,6 +333,25 @@ public class DispatchVisibilityTest {
         @Override
         public String evaluate(Run<?, ?> run, FilePath workspace, TaskListener listener, String macroName) {
             throw new RuntimeException("runtime boom");
+        }
+    }
+
+    /** Registered macro that throws a wrapped {@link InterruptedException} → render aborts (ABORTED). */
+    @TestExtension
+    public static class InterruptingMacro extends DataBoundTokenMacro {
+        @Override
+        public boolean acceptsMacroName(String name) {
+            return "SLACK_TEST_INTERRUPT".equals(name);
+        }
+
+        @Override
+        public String evaluate(AbstractBuild<?, ?> context, TaskListener listener, String macroName) {
+            throw new RuntimeException(new InterruptedException("interrupted during evaluate"));
+        }
+
+        @Override
+        public String evaluate(Run<?, ?> run, FilePath workspace, TaskListener listener, String macroName) {
+            throw new RuntimeException(new InterruptedException("interrupted during evaluate"));
         }
     }
 }

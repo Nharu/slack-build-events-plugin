@@ -3,6 +3,7 @@ package io.jenkins.plugins.slackbuildevents;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
+import java.util.function.Supplier;
 import org.junit.Test;
 
 /**
@@ -90,6 +91,47 @@ public class FailureLogThrottleTest {
             assertEquals(0, logs.warningsContaining("extra1 failure"));
             assertEquals(0, logs.warningsContaining("extra2 failure"));
             assertEquals(1, logs.warningsContaining("throttle saturated"));
+        }
+    }
+
+    @Test
+    public void windowRollPiggybacksSuppressedCountOnHeadlineAboveDetail() {
+        FailureLogThrottle throttle = new FailureLogThrottle();
+        try (LogCapture logs = new LogCapture(FailureLogThrottle.class)) {
+            Supplier<FailureMessage> supplier = () -> new FailureMessage("HEADLINE", "DETAIL-1\nDETAIL-2");
+            throttle.recordFailure("sigA", T0, supplier);
+            throttle.recordFailure("sigA", T0 + 1_000, supplier); // suppressed
+            // Window roll: the first log of the new window piggybacks the previous window's count.
+            throttle.recordFailure("sigA", T0 + FailureLogThrottle.WINDOW_MS, supplier);
+
+            String rolled = logs.records.stream()
+                    .map(r -> String.valueOf(r.getMessage()))
+                    .filter(m -> m.contains("similar failure(s) suppressed"))
+                    .findFirst()
+                    .orElseThrow(() -> new AssertionError("no piggybacked window-roll log"));
+            String[] lines = rolled.split("\n", -1);
+            // The suppression count rides on the headline (line 1), above the multi-line detail.
+            assertTrue("suffix is on the headline", lines[0].contains("similar failure(s) suppressed"));
+            assertTrue("headline is line 1", lines[0].startsWith("HEADLINE"));
+            assertTrue("detail follows below the headline", rolled.contains("\nDETAIL-1\nDETAIL-2"));
+        }
+    }
+
+    @Test
+    public void supplierThrowingEmitsStandInAndKeepsWindowRegistered() {
+        FailureLogThrottle throttle = new FailureLogThrottle();
+        try (LogCapture logs = new LogCapture(FailureLogThrottle.class)) {
+            // First occurrence: the message builder throws → a visible stand-in WARNING, not a silent drop.
+            throttle.recordFailure("sigA", T0, () -> {
+                throw new IllegalStateException("builder blew up");
+            });
+            assertEquals(1, logs.warningsContaining("could not be built"));
+            assertEquals(1, logs.warningsContaining("IllegalStateException"));
+
+            // The window was registered despite the throw: a later same-signature failure is suppressed.
+            throttle.recordFailure("sigA", T0 + 1_000, () -> new FailureMessage("real message"));
+            assertEquals(0, logs.warningsContaining("real message"));
+            assertEquals("still just the stand-in", 1, logs.warningCount());
         }
     }
 

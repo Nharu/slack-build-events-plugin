@@ -49,12 +49,17 @@ public class RetryCapAndDropTest {
         SlackTestHelpers.config().setDefaultWebhookCredentialId("wh");
         SlackTestHelpers.config().setRules(List.of(SlackTestHelpers.rule("myjob", List.of("start"))));
 
-        j.buildAndAssertSuccess(j.createFreeStyleProject("myjob"));
+        try (LogCapture logs = new LogCapture(FailureLogThrottle.class)) {
+            j.buildAndAssertSuccess(j.createFreeStyleProject("myjob"));
 
-        // The barrier must return (no leaked future); the drop counted once; send never reached.
-        NotificationDispatcher.get().awaitAllDispatched(5, TimeUnit.SECONDS);
-        assertEquals(1, NotificationDispatcher.get().droppedCount());
-        assertEquals(0, sender.calls.get());
+            // The barrier must return (no leaked future); the drop counted once; send never reached.
+            NotificationDispatcher.get().awaitAllDispatched(5, TimeUnit.SECONDS);
+            assertEquals(1, NotificationDispatcher.get().droppedCount());
+            assertEquals(0, sender.calls.get());
+            // A rejection from an already-shut-down executor is a teardown drop, not real saturation, so it
+            // stays QUIET (the !isShutdown() gate) — no false "queue saturated" WARNING.
+            assertEquals(0, logs.warningsContaining("QUEUE_SATURATED"));
+        }
     }
 
     @Test
