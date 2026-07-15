@@ -17,4 +17,10 @@
     <code>${VAR}</code> / <code>$VAR</code> that is not a recognized macro does not expand — the
     whole message is then sent as raw, unexpanded text.
   </p>
+
+  <p>
+    Note: this hint only checks the <code>${ENV,var="…"}</code> form. Other registered macros can
+    also emit SCM/PR-derived values that need Slack escaping, so a template can still carry an
+    unescaped value that this hint does not flag.
+  </p>
 </div>
