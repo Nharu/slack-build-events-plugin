@@ -32,13 +32,16 @@ public final class TemplateMigrationSweep {
             if (config == null) {
                 return;
             }
+            // Compute the recognized-macro-name set once and reuse it across the whole sweep instead of
+            // recomputing it (a full TokenMacro.all() scan) for every template.
+            Set<String> known = TemplateLint.knownMacroNames();
             Set<String> names = new LinkedHashSet<>();
             for (EventType event : EventType.values()) {
-                names.addAll(TemplateLint.rawFallbackNames(config.defaultTemplateFor(event)));
+                names.addAll(TemplateLint.rawFallbackNames(config.defaultTemplateFor(event), known));
             }
             for (NotificationRule rule : config.getRules()) {
                 for (EventType event : EventType.values()) {
-                    names.addAll(TemplateLint.rawFallbackNames(rule.templateFor(event)));
+                    names.addAll(TemplateLint.rawFallbackNames(rule.templateFor(event), known));
                 }
             }
             if (!names.isEmpty()) {

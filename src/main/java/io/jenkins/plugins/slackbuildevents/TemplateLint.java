@@ -47,9 +47,17 @@ final class TemplateLint {
     private static final Set<String> SLACK_MACROS = Set.of(
             "SLACK_DEPLOYER", "SLACK_BUILD_URL", "SLACK_DURATION", "SLACK_GIT_BRANCH", "SLACK_GIT_COMMIT");
 
-    /** Infrastructure env vars that are not attacker-influenced; never flagged. */
+    /**
+     * Infrastructure env vars treated as not attacker-influenced, so an {@code ${ENV,var="…"}}
+     * reference to one of them is not flagged. Deliberately excludes user-settable display values such
+     * as {@code BUILD_DISPLAY_NAME}. Residual: {@code JOB_NAME} / {@code JOB_BASE_NAME} /
+     * {@code BUILD_TAG} can carry PR-influenced text in multibranch jobs, but are kept here — the
+     * plugin's own built-in default templates reference {@code ${ENV,var="JOB_NAME"}}, so exempting it
+     * avoids warning on those defaults; a broader multibranch audit of this allowlist is tracked
+     * separately.
+     */
     private static final Set<String> SAFE_ENV = Set.of(
-            "JOB_NAME", "JOB_BASE_NAME", "BUILD_NUMBER", "BUILD_ID", "BUILD_TAG", "BUILD_DISPLAY_NAME",
+            "JOB_NAME", "JOB_BASE_NAME", "BUILD_NUMBER", "BUILD_ID", "BUILD_TAG",
             "JENKINS_URL", "BUILD_URL", "JOB_URL", "NODE_NAME", "EXECUTOR_NUMBER", "WORKSPACE");
 
     /** SCM/PR/commit env vars that have a safe, escaped {@code ${SLACK_*}} replacement. */
@@ -152,11 +160,20 @@ final class TemplateLint {
      */
     @NonNull
     static Set<String> rawFallbackNames(String template) {
+        return rawFallbackNames(template, knownMacroNames());
+    }
+
+    /**
+     * Same as {@link #rawFallbackNames(String)} but reuses a caller-computed known-macro-name set, so a
+     * sweep over many templates computes it once instead of once per template.
+     */
+    @NonNull
+    static Set<String> rawFallbackNames(String template, Set<String> known) {
         String t = Util.fixEmpty(template);
         if (t == null) {
             return Collections.emptySet();
         }
-        return rawFallbackNames(scan(t), knownMacroNames());
+        return rawFallbackNames(scan(t), known);
     }
 
     private static Set<String> rawFallbackNames(Scan scan, Set<String> known) {
@@ -188,7 +205,7 @@ final class TemplateLint {
      * the extension list is unavailable (e.g. a pure unit context). A single misbehaving macro is
      * skipped rather than allowed to break the lint.
      */
-    private static Set<String> knownMacroNames() {
+    static Set<String> knownMacroNames() {
         Set<String> names = new HashSet<>(SLACK_MACROS);
         try {
             for (TokenMacro macro : TokenMacro.all()) {
