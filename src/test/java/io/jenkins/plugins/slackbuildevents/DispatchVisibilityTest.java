@@ -5,6 +5,7 @@ import static org.junit.Assert.assertEquals;
 import hudson.FilePath;
 import hudson.model.AbstractBuild;
 import hudson.model.FreeStyleBuild;
+import hudson.model.FreeStyleProject;
 import hudson.model.Run;
 import hudson.model.TaskListener;
 import java.io.IOException;
@@ -19,6 +20,7 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.jenkinsci.plugins.tokenmacro.DataBoundTokenMacro;
+import org.jenkinsci.plugins.tokenmacro.MacroEvaluationException;
 import org.junit.Rule;
 import org.junit.Test;
 import org.jvnet.hudson.test.JenkinsRule;
@@ -207,6 +209,84 @@ public class DispatchVisibilityTest {
     }
 
     @Test
+    public void signatureStableAcrossMacroWordingChanges() throws Exception {
+        TestWebhookSender sender = new TestWebhookSender();
+        installWithCredential(sender);
+        NotificationRule rule = SlackTestHelpers.rule("myjob", List.of("success"));
+        rule.setSuccessTemplate("x=${SLACK_TEST_REWORDING}");
+        SlackTestHelpers.config().setRules(List.of(rule));
+        FreeStyleProject project = j.createFreeStyleProject("myjob");
+
+        try (LogCapture logs = new LogCapture(FailureLogThrottle.class)) {
+            // Same job, same template, same failure — but the macro words its exception differently each
+            // time, as a token-macro upgrade or a message carrying per-build text would. The signature is
+            // built from the template digest and the root cause class, so the wording cannot split it.
+            j.buildAndAssertSuccess(project);
+            SlackTestHelpers.awaitDispatch();
+            j.buildAndAssertSuccess(project);
+            SlackTestHelpers.awaitDispatch();
+
+            assertEquals("one recurring failure stays one suppression bucket", 1, logs.warningsContaining("RENDER_DEGRADED"));
+        }
+    }
+
+    @Test
+    public void warningBodyStillNamesTheToken() throws Exception {
+        TestWebhookSender sender = new TestWebhookSender();
+        installWithCredential(sender);
+        NotificationRule rule = SlackTestHelpers.rule("myjob", List.of("success"));
+        rule.setSuccessTemplate("bad=${DEFINITELY_UNKNOWN}");
+        SlackTestHelpers.config().setRules(List.of(rule));
+
+        try (LogCapture logs = new LogCapture(FailureLogThrottle.class)) {
+            j.buildAndAssertSuccess(j.createFreeStyleProject("myjob"));
+            SlackTestHelpers.awaitDispatch();
+
+            // Dropping the hint from the signature must not cost the operator the diagnosis.
+            assertEquals(1, logs.warningsContaining("token 'DEFINITELY_UNKNOWN'"));
+        }
+    }
+
+    @Test
+    public void hintIsNotRatifiedUnlessPresentInOurTemplate() throws Exception {
+        TestWebhookSender sender = new TestWebhookSender();
+        installWithCredential(sender);
+        NotificationRule rule = SlackTestHelpers.rule("myjob", List.of("success"));
+        rule.setSuccessTemplate("x=${SLACK_TEST_MISNAMING}");
+        SlackTestHelpers.config().setRules(List.of(rule));
+
+        try (LogCapture logs = new LogCapture(FailureLogThrottle.class)) {
+            j.buildAndAssertSuccess(j.createFreeStyleProject("myjob"));
+            SlackTestHelpers.awaitDispatch();
+
+            // The failure is still signaled ...
+            assertEquals(1, logs.warningsContaining("RENDER_DEGRADED"));
+            // ... but a name our template never references is not presented as one of our tokens.
+            assertEquals(0, logs.warningsContaining("token 'GHOST_TOKEN'"));
+        }
+    }
+
+    @Test
+    public void hintCannotForgeLogLines() throws Exception {
+        TestWebhookSender sender = new TestWebhookSender();
+        installWithCredential(sender);
+        NotificationRule rule = SlackTestHelpers.rule("myjob", List.of("success"));
+        rule.setSuccessTemplate("x=${SLACK_TEST_FORGING}");
+        SlackTestHelpers.config().setRules(List.of(rule));
+
+        try (LogCapture logs = new LogCapture(FailureLogThrottle.class)) {
+            j.buildAndAssertSuccess(j.createFreeStyleProject("myjob"));
+            SlackTestHelpers.awaitDispatch();
+
+            // The failure is still signaled ...
+            assertEquals(1, logs.warningsContaining("RENDER_DEGRADED"));
+            // ... but a quoted span carrying control characters is not a macro name, so nothing crafted
+            // ever reaches the headline's token slot to break it into a forged line.
+            assertEquals(0, logs.warningsContaining("token '"));
+        }
+    }
+
+    @Test
     public void everyFailureCategoryIsAccountedFor() {
         // Tripwire: a new FailureCategory added without updating this set (and giving it visibility
         // coverage) fails the build, so no dispatch-failure class slips in unsignaled.
@@ -242,6 +322,78 @@ public class DispatchVisibilityTest {
         SlackTestHelpers.config().setRules(List.of(SlackTestHelpers.rule("myjob", List.of("success"))));
         j.buildAndAssertSuccess(j.createFreeStyleProject("myjob"));
         SlackTestHelpers.awaitDispatch();
+    }
+
+    /** Words its exception differently on every call, for one logically identical failure. */
+    @TestExtension
+    public static class RewordingMacro extends DataBoundTokenMacro {
+        private static final AtomicInteger CALLS = new AtomicInteger();
+
+        @Override
+        public boolean acceptsMacroName(String name) {
+            return "SLACK_TEST_REWORDING".equals(name);
+        }
+
+        @Override
+        public String evaluate(AbstractBuild<?, ?> context, TaskListener listener, String macroName)
+                throws MacroEvaluationException {
+            throw reworded();
+        }
+
+        @Override
+        public String evaluate(Run<?, ?> run, FilePath workspace, TaskListener listener, String macroName)
+                throws MacroEvaluationException {
+            throw reworded();
+        }
+
+        private static MacroEvaluationException reworded() {
+            int n = CALLS.incrementAndGet();
+            return new MacroEvaluationException("variant " + n + ": could not expand 'TOKEN_" + n + "' this build");
+        }
+    }
+
+    /** Names a token in its message that our template never references. */
+    @TestExtension
+    public static class MisnamingMacro extends DataBoundTokenMacro {
+        @Override
+        public boolean acceptsMacroName(String name) {
+            return "SLACK_TEST_MISNAMING".equals(name);
+        }
+
+        @Override
+        public String evaluate(AbstractBuild<?, ?> context, TaskListener listener, String macroName)
+                throws MacroEvaluationException {
+            throw new MacroEvaluationException("Unrecognized macro 'GHOST_TOKEN' in 'some other template'");
+        }
+
+        @Override
+        public String evaluate(Run<?, ?> run, FilePath workspace, TaskListener listener, String macroName)
+                throws MacroEvaluationException {
+            throw new MacroEvaluationException("Unrecognized macro 'GHOST_TOKEN' in 'some other template'");
+        }
+    }
+
+    /** Puts CR/LF inside the quoted span, attempting to forge a log line through the hint. */
+    @TestExtension
+    public static class LogForgingMacro extends DataBoundTokenMacro {
+        private static final String FORGED = "Unrecognized macro 'X\nSEVERE: forged log line' in 'x=${X}'";
+
+        @Override
+        public boolean acceptsMacroName(String name) {
+            return "SLACK_TEST_FORGING".equals(name);
+        }
+
+        @Override
+        public String evaluate(AbstractBuild<?, ?> context, TaskListener listener, String macroName)
+                throws MacroEvaluationException {
+            throw new MacroEvaluationException(FORGED);
+        }
+
+        @Override
+        public String evaluate(Run<?, ?> run, FilePath workspace, TaskListener listener, String macroName)
+                throws MacroEvaluationException {
+            throw new MacroEvaluationException(FORGED);
+        }
     }
 
     /** Registered macro that throws a plain {@link RuntimeException} → both passes throw → FALLBACK. */

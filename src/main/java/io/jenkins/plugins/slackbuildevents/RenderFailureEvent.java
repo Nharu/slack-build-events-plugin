@@ -44,7 +44,11 @@ final class RenderFailureEvent {
     @NonNull
     final String template;
 
-    /** Best-effort name of the token that failed the strict pass; {@code null} when unparseable. */
+    /**
+     * Best-effort name of the token that failed the strict pass, for the WARNING body only — never part
+     * of the signature. {@code null} unless the name parsed out of the third-party exception message is
+     * shaped like a macro name and is actually referenced by {@link #template}.
+     */
     @CheckForNull
     final String failedMacroHint;
 

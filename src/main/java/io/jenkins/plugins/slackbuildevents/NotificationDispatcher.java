@@ -64,6 +64,8 @@ public class NotificationDispatcher {
     /** Global cap on outstanding 429 retries (memory guard); consistent with the queue size. */
     private static final int MAX_PENDING_RETRIES = 500;
     private static final long AWAIT_TERMINATION_SECONDS = 5L;
+    /** Upper bound on a plausible token-macro name; anything longer is not a name we will echo. */
+    private static final int MAX_MACRO_NAME_LENGTH = 64;
 
     private volatile ExecutorService executor;
     private volatile ScheduledExecutorService scheduler;
@@ -270,23 +272,22 @@ public class NotificationDispatcher {
                         + " — webhook credential not found (removed or rotated). No notification was sent."));
     }
 
+    /**
+     * Signature: category + credentialId + templateDigest + unwrapped root cause class — deliberately
+     * uniform across DEGRADED and FALLBACK, and deliberately free of anything derived from a third-party
+     * exception message. The failed-macro hint is NOT a key component: it is parsed out of token-macro's
+     * wording, so keying on it let a library rewording split one recurring failure across signatures, and
+     * let a message carrying per-build text mint one signature per build — filling the throttle's fixed
+     * table until unrelated failures stopped being logged at all. The hint stays in the body, where it is
+     * diagnostic without being load-bearing.
+     */
     private void signalRenderFailure(@NonNull RenderFailureEvent event) {
         FailureCategory category = categoryOf(event.category);
-        String signature;
-        if (event.category == RenderCategory.DEGRADED) {
-            // Signature: category + credentialId + templateDigest (+ failedMacroHint when present).
-            signature = (event.failedMacroHint != null)
-                    ? signatureOf(
-                            category, event.webhookCredentialId, templateDigest(event.template), event.failedMacroHint)
-                    : signatureOf(category, event.webhookCredentialId, templateDigest(event.template));
-        } else {
-            // FALLBACK signature: category + credentialId + templateDigest + unwrapped root cause class.
-            signature = signatureOf(
-                    category,
-                    event.webhookCredentialId,
-                    templateDigest(event.template),
-                    event.rootCause.getClass().getName());
-        }
+        String signature = signatureOf(
+                category,
+                event.webhookCredentialId,
+                templateDigest(event.template),
+                event.rootCause.getClass().getName());
         recordWarning(signature, () -> renderMessage(event));
     }
 
@@ -363,7 +364,7 @@ public class NotificationDispatcher {
         // All header fields come from the event (one consistent provenance, including the build number).
         String headline = "Slack notification " + category + ": "
                 + header(event.jobFullName, event.buildNumber, event.event, event.webhookCredentialId)
-                + (event.failedMacroHint != null ? " token '" + event.failedMacroHint + "'" : "")
+                + (event.failedMacroHint != null ? " token '" + scrubForLog(event.failedMacroHint) + "'" : "")
                 + " — " + scrubForLog(summarize(event.rootCause)) + ". " + guidance;
         // Full stack goes in the detail, below the headline, so a piggybacked suppression count stays on
         // line 1. Rate-limited to one per window.
@@ -620,11 +621,11 @@ public class NotificationDispatcher {
     private static RenderFailureEvent failureEvent(
             @NonNull RenderCategory category, @NonNull NotificationContext context, @NonNull Throwable cause) {
         Throwable rootCause = RenderFailureEvent.unwrap(cause);
-        // The hint only sharpens the DEGRADED suppression signature, and it must be parsed from the
-        // unwrapped root cause: the outer wrapper's message is the constant "Error processing tokens",
-        // which carries no token name, so parsing the wrapper would yield null on the dominant
-        // unrecognized-macro path. FALLBACK's root cause is an arbitrary macro throwable, so no hint.
-        String hint = (category == RenderCategory.DEGRADED) ? parseFailedMacroHint(rootCause) : null;
+        // The hint is body-only sugar, and it must be parsed from the unwrapped root cause: the outer
+        // wrapper's message is the constant "Error processing tokens", which carries no token name, so
+        // parsing the wrapper would yield null on the dominant unrecognized-macro path. FALLBACK's root
+        // cause is an arbitrary macro throwable, so no hint.
+        String hint = (category == RenderCategory.DEGRADED) ? parseFailedMacroHint(rootCause, context.template()) : null;
         return new RenderFailureEvent(
                 category,
                 cause,
@@ -638,13 +639,19 @@ public class NotificationDispatcher {
     }
 
     /**
-     * Best-effort extraction of the failing token's name from the strict-pass exception message
-     * (e.g. token-macro's {@code Unrecognized macro 'NAME' in '...'}). Returns {@code null} when no
-     * quoted name is present; the signature key falls back to the template digest, so this is never
-     * load-bearing for signature stability.
+     * Best-effort name of the failing token, for the WARNING body only. Takes the first quoted span of
+     * the strict-pass exception message (e.g. token-macro's {@code Unrecognized macro 'NAME' in '...'})
+     * and adopts it only if it both looks like a macro name and is actually referenced by our template.
+     * Returns {@code null} otherwise.
+     *
+     * <p>The message is third-party text: its wording is not a contract, and a reworded message can put
+     * something else entirely — a whole template, a build-specific string — in the first quoted span.
+     * Ratifying against our own template is what keeps a rewording from presenting arbitrary text to the
+     * operator as a token name. A rejected hint costs only the name in the body; the WARNING, its
+     * signature, and the stack-trace detail are unaffected.
      */
     @CheckForNull
-    private static String parseFailedMacroHint(@NonNull Throwable cause) {
+    private static String parseFailedMacroHint(@NonNull Throwable cause, @NonNull String template) {
         String message = cause.getMessage();
         if (message == null) {
             return null;
@@ -657,7 +664,62 @@ public class NotificationDispatcher {
         if (close <= open + 1) {
             return null;
         }
-        return message.substring(open + 1, close);
+        String candidate = message.substring(open + 1, close);
+        return (isMacroIdentifier(candidate) && referencesToken(template, candidate)) ? candidate : null;
+    }
+
+    /** Whether {@code value} is shaped like a token-macro name: {@code [A-Za-z_][A-Za-z0-9_]{0,63}}. */
+    private static boolean isMacroIdentifier(@NonNull String value) {
+        if (value.isEmpty() || value.length() > MAX_MACRO_NAME_LENGTH) {
+            return false;
+        }
+        char first = value.charAt(0);
+        if (!isAsciiLetter(first) && first != '_') {
+            return false;
+        }
+        for (int i = 1; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (!isAsciiLetter(c) && !isAsciiDigit(c) && c != '_') {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Whether {@code template} references {@code ${name}} — plain scanning, no regex, so a hostile
+     * template can never cost more than a linear pass. A match requires the name to end at a character
+     * that cannot continue an identifier (so {@code ${BUILD_STATUS}} does not ratify {@code BUILD}) and
+     * the {@code $} not to be backslash-escaped (so {@code \${X}}, a literal, does not ratify {@code X}).
+     */
+    private static boolean referencesToken(@NonNull String template, @NonNull String name) {
+        String opening = "${" + name;
+        int from = 0;
+        while (true) {
+            int at = template.indexOf(opening, from);
+            if (at < 0) {
+                return false;
+            }
+            int after = at + opening.length();
+            boolean boundedName = after >= template.length() || !continuesIdentifier(template.charAt(after));
+            boolean escaped = at > 0 && template.charAt(at - 1) == '\\';
+            if (boundedName && !escaped) {
+                return true;
+            }
+            from = at + 1;
+        }
+    }
+
+    private static boolean continuesIdentifier(char c) {
+        return isAsciiLetter(c) || isAsciiDigit(c) || c == '_';
+    }
+
+    private static boolean isAsciiLetter(char c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+    }
+
+    private static boolean isAsciiDigit(char c) {
+        return c >= '0' && c <= '9';
     }
 
     /**
